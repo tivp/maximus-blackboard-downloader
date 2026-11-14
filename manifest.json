@@ -1,0 +1,65 @@
+{
+    "manifest_version": 3,
+    "name": "Maximus Orden | Blackboard",
+    "version": "3.2.0",
+    "description": "Descarga unidades o el curso completo de Blackboard en ZIP (cierre con la X en Unity/SCORM, soporte HTML + .url, API REST y árbol ASCII).",
+    "author": "tivp",
+    "icons": {
+        "16": "Transfomer Logo.png",
+        "48": "Transfomer Logo.png",
+        "128": "Transfomer Logo.png"
+    },
+    "action": {
+        "default_popup": "popup.html",
+        "default_icon": "Transfomer Logo.png",
+        "default_title": "Maximus Orden | Blackboard"
+    },
+    "permissions": [
+        "clipboardWrite",
+        "storage",
+        "scripting",
+        "tabs",
+        "userScripts"
+    ],
+    "host_permissions": [
+        "<all_urls>"
+    ],
+    "background": {
+        "service_worker": "background.js"
+    },
+    "content_scripts": [
+        {
+            "matches": [
+                "https://*/*"
+            ],
+            "js": [
+                "page-hook.js"
+            ],
+            "run_at": "document_start",
+            "world": "MAIN",
+            "all_frames": false
+        },
+        {
+            "matches": [
+                "https://*/*"
+            ],
+            "js": [
+                "content.js"
+            ],
+            "run_at": "document_idle",
+            "all_frames": false
+        }
+    ],
+    "web_accessible_resources": [
+        {
+            "resources": [
+                "modules/*.js",
+                "Transfomer Logo.png",
+                "Transfomer Logo.svg"
+            ],
+            "matches": [
+                "<all_urls>"
+            ]
+        }
+    ]
+}

@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="utf-8">
+    <title>Maximus Orden | Blackboard</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 14px 16px;
+            width: 300px;
+            background: #f8fafc;
+            color: #1e293b;
+            font: 13px/1.45 Arial, sans-serif;
+        }
+        .cabecera {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #cbd5e1;
+            margin-bottom: 10px;
+        }
+        .cabecera img {
+            width: 30px;
+            height: 30px;
+            object-fit: contain;
+        }
+        .titulo {
+            font-weight: 700;
+            font-size: 14px;
+            color: #0f172a;
+        }
+        .version {
+            font-size: 11px;
+            color: #64748b;
+        }
+        .modulo-lista {
+            margin: 8px 0 0;
+            padding-left: 18px;
+            color: #334155;
+            font-size: 12px;
+        }
+        .modulo-lista li {
+            margin-bottom: 4px;
+        }
+        .nota {
+            margin-top: 10px;
+            padding: 8px 10px;
+            background: #e2e8f0;
+            border-radius: 4px;
+            font-size: 11px;
+            color: #334155;
+        }
+        .actualizacion-box {
+            margin-top: 12px;
+            padding-top: 10px;
+            border-top: 1px solid #cbd5e1;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .btn-actualizar {
+            width: 100%;
+            padding: 8px 10px;
+            border: 1px solid #1e3a5f;
+            border-radius: 5px;
+            background: #26394b;
+            color: #ffffff;
+            font: 700 12px Arial, sans-serif;
+            cursor: pointer;
+            transition: background-color 0.15s, opacity 0.15s;
+        }
+        .btn-actualizar:hover:not(:disabled) {
+            background: #1a2937;
+        }
+        .btn-actualizar:disabled {
+            opacity: 0.65;
+            cursor: wait;
+        }
+        .btn-permiso {
+            width: 100%;
+            padding: 6px 8px;
+            border: 1px solid #d97706;
+            border-radius: 4px;
+            background: #fef3c7;
+            color: #92400e;
+            font: 600 11px Arial, sans-serif;
+            cursor: pointer;
+        }
+        .btn-permiso:hover {
+            background: #fde68a;
+        }
+        .estado-sync {
+            padding: 6px 8px;
+            border-radius: 4px;
+            background: #ffffff;
+            border: 1px solid #cbd5e1;
+            font-size: 11px;
+            color: #475569;
+            word-break: break-word;
+        }
+        .estado-sync.ok {
+            background: #ecfdf5;
+            border-color: #34d399;
+            color: #065f46;
+        }
+        .estado-sync.error {
+            background: #fef2f2;
+            border-color: #f87171;
+            color: #991b1b;
+        }
+        .repo-link {
+            font-size: 11px;
+            color: #2563eb;
+            text-decoration: none;
+            align-self: flex-start;
+        }
+        .repo-link:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="cabecera">
+        <img id="logo-transformer" alt="Transformer">
+        <div>
+            <div class="titulo">Maximus Orden</div>
+            <div class="version">Blackboard Ultra · v3.2.0</div>
+        </div>
+    </div>
+    <div>Módulos activos en cursos de Blackboard:</div>
+    <ul class="modulo-lista">
+        <li><b>Descargar .zip</b> en cada unidad o semana</li>
+        <li><b>Descargar todo el curso</b> cuando el examen final está abierto</li>
+        <li>Cierre automático con la <b>X</b> en paquetes Unity / SCORM</li>
+        <li>Árbol ASCII en <code>_REPORTE.txt</code> y accesos <code>.url</code></li>
+    </ul>
+    <div class="nota">
+        Haz clic en el botón de cualquier unidad para bajar el ZIP, o <b>Mayús + clic</b> para volver a escanearla.
+    </div>
+    <div class="actualizacion-box">
+        <button id="btn-actualizar-scripts" class="btn-actualizar" type="button">
+            Actualizar los scripts de la extensión
+        </button>
+        <div id="estado-actualizacion" class="estado-sync">
+            Comprobando estado...
+        </div>
+        <button id="btn-permiso-userscripts" class="btn-permiso" type="button" hidden>
+            Activar permiso UserScripts en Chrome
+        </button>
+        <a class="repo-link" href="https://github.com/tivp/maximus-blackboard-downloader" target="_blank" rel="noopener">
+            github.com/tivp/maximus-blackboard-downloader
+        </a>
+    </div>
+    <script type="module" src="popup.js"></script>
+</body>
+</html>
