@@ -1,12 +1,17 @@
 // Estilos CSS, barra de progreso por bloques, colores de estado en filas y botonera con el logo de Transformer en Base64.
 
-import { LOGO_BASE64, estado } from './config.js';
+import { TARJETAS, estado } from './config.js';
+import {
+    esTarjetaEvaluacion,
+    esElementoEvaluacionEnNodo,
+    obtenerContenedorFilaEvaluacion
+} from './scanner.js';
 
 export function cambiarTextoBoton(boton, etiqueta) {
     if (!boton) return;
     let span = boton.querySelector('.maximus-boton-texto');
     if (!span) {
-        boton.innerHTML = `<img class="maximus-logo" src="${LOGO_BASE64}" alt=""><span class="maximus-boton-texto"></span>`;
+        boton.innerHTML = '<span class="maximus-boton-texto"></span>';
         span = boton.querySelector('.maximus-boton-texto');
     }
     span.textContent = etiqueta;
@@ -126,15 +131,6 @@ export function inyectarCss() {
             transition: background-color .15s, border-color .15s, color .15s;
         }
 
-        .maximus-logo {
-            width: 16px !important;
-            height: 16px !important;
-            flex: 0 0 16px !important;
-            object-fit: contain !important;
-            pointer-events: none !important;
-            opacity: .88;
-        }
-
         .maximus-boton.listo {
             background: #e8f8ee !important;
             border-color: #29aa59 !important;
@@ -217,6 +213,26 @@ export function inyectarCss() {
             cursor: pointer;
             text-decoration: underline;
             font: 11px Arial,sans-serif;
+        }
+
+        .maximus-fila-evaluacion {
+            background: #fff7cc !important;
+            border: 1px solid #f0dd8c !important;
+            box-shadow: inset 4px 0 0 #e5b82e !important;
+            border-radius: 6px !important;
+            transition: background-color .15s, border-color .15s, box-shadow .15s;
+        }
+
+        .maximus-fila-evaluacion:hover,
+        .maximus-fila-evaluacion:focus-within {
+            background: #ffefad !important;
+            border-color: #e6c95c !important;
+            box-shadow: inset 4px 0 0 #d4a11a !important;
+        }
+
+        .maximus-fila-evaluacion a,
+        .maximus-fila-evaluacion button {
+            background-color: transparent !important;
         }
 
         .maximus-fila-ok,
@@ -351,4 +367,44 @@ export function restaurarColoresFilas() {
 
 export function limpiarPanelesEnVistaDocumento() {
     document.querySelectorAll('.maximus-panel').forEach(p => p.remove());
+}
+
+export function marcarEvaluaciones() {
+    const marcados = new Set();
+
+    for (const card of document.querySelectorAll(TARJETAS)) {
+        if (!esTarjetaEvaluacion(card)) continue;
+        const fila = obtenerContenedorFilaEvaluacion(card);
+        if (!fila) continue;
+        marcados.add(fila);
+        fila.classList.add('maximus-fila-evaluacion');
+    }
+
+    for (const fila of document.querySelectorAll('.click-to-invoke-container')) {
+        if (fila.closest(TARJETAS)) continue;
+        if (
+            fila.closest(
+                '[data-maximus], document-panel, section.page-scorm-launch-frame, learning-module-panel-view, content-page-header, nav, .MuiBreadcrumbs-root, .MuiDrawer-root'
+            )
+        ) {
+            continue;
+        }
+        if (
+            fila.querySelector(
+                'button[id^="learning-module-title-"], [data-analytics-id="course.learning.module.base.item.toggleLm.button"], button[id^="folder-title-"], [data-analytics-id="content.item.folder.toggleFolder.button"]'
+            )
+        ) {
+            continue;
+        }
+        if (esElementoEvaluacionEnNodo(fila, null)) {
+            marcados.add(fila);
+            fila.classList.add('maximus-fila-evaluacion');
+        }
+    }
+
+    for (const el of document.querySelectorAll('.maximus-fila-evaluacion')) {
+        if (!marcados.has(el)) {
+            el.classList.remove('maximus-fila-evaluacion');
+        }
+    }
 }

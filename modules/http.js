@@ -33,8 +33,192 @@ function base64ABytes(b64) {
     return bytes;
 }
 
+function peticionViaRuntime(url) {
+    return new Promise((resolve, reject) => {
+        if (estado.cancelado) {
+            const err = new Error('Descarga detenida por el usuario');
+            err.esCancelacion = true;
+            return reject(err);
+        }
+
+        let finalizado = false;
+        const requestId = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+
+        const abortar = () => {
+            if (finalizado) return;
+            finalizado = true;
+            clearTimeout(timer);
+            estado.abortadoresActivos.delete(abortar);
+            try {
+                chrome.runtime.sendMessage({ action: 'MAXIMUS_ABORT', requestId });
+            } catch {
+                // Ignorar
+            }
+            const err = new Error('Descarga detenida por el usuario');
+            err.esCancelacion = true;
+            reject(err);
+        };
+
+        estado.abortadoresActivos.add(abortar);
+
+        const timer = setTimeout(() => {
+            if (finalizado) return;
+            finalizado = true;
+            estado.abortadoresActivos.delete(abortar);
+            try {
+                chrome.runtime.sendMessage({ action: 'MAXIMUS_ABORT', requestId });
+            } catch {
+                // Ignorar
+            }
+            reject(new Error('Tiempo agotado'));
+        }, CFG.TIMEOUT);
+
+        try {
+            chrome.runtime.sendMessage(
+                {
+                    action: 'MAXIMUS_FETCH',
+                    requestId,
+                    url,
+                    timeout: CFG.TIMEOUT,
+                    maxBytes: CFG.MAX_MB * 1048576
+                },
+                respuesta => {
+                    if (finalizado) return;
+                    finalizado = true;
+                    clearTimeout(timer);
+                    estado.abortadoresActivos.delete(abortar);
+
+                    if (chrome.runtime.lastError) {
+                        return reject(new Error(chrome.runtime.lastError.message || 'Error en background'));
+                    }
+                    if (!respuesta || !respuesta.ok) {
+                        return reject(new Error(respuesta?.error || 'Error de red o CORS'));
+                    }
+
+                    try {
+                        const bytes = base64ABytes(respuesta.base64);
+                        if (!bytes.byteLength) {
+                            return reject(new Error('Archivo vacío'));
+                        }
+                        resolve({
+                            bytes,
+                            headers: respuesta.headers || {},
+                            url: respuesta.url || url
+                        });
+                    } catch (e) {
+                        reject(new Error(`Fallo al decodificar binario: ${e.message}`));
+                    }
+                }
+            );
+        } catch (err) {
+            if (finalizado) return;
+            finalizado = true;
+            clearTimeout(timer);
+            estado.abortadoresActivos.delete(abortar);
+            reject(err);
+        }
+    });
+}
+
+function peticionViaPuenteDom(url) {
+    return new Promise((resolve, reject) => {
+        if (estado.cancelado) {
+            const err = new Error('Descarga detenida por el usuario');
+            err.esCancelacion = true;
+            return reject(err);
+        }
+
+        let finalizado = false;
+        const requestId = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        const eventoRespuesta = `maximus-bridge-res-${requestId}`;
+
+        const limpiar = () => {
+            clearTimeout(timer);
+            estado.abortadoresActivos.delete(abortar);
+            window.removeEventListener('message', alMensaje);
+            window.removeEventListener(eventoRespuesta, alEvento);
+        };
+
+        const procesarPayload = respuesta => {
+            if (finalizado) return;
+            finalizado = true;
+            limpiar();
+
+            if (!respuesta || !respuesta.ok) {
+                return reject(new Error(respuesta?.error || 'Error de red o CORS'));
+            }
+
+            try {
+                const bytes = base64ABytes(respuesta.base64);
+                if (!bytes.byteLength) {
+                    return reject(new Error('Archivo vacío'));
+                }
+                resolve({
+                    bytes,
+                    headers: respuesta.headers || {},
+                    url: respuesta.url || url
+                });
+            } catch (err) {
+                reject(new Error(`Fallo al decodificar binario: ${err.message}`));
+            }
+        };
+
+        const alMensaje = e => {
+            if (e.source !== window || e.data?.__maximus !== 'bridge-res' || e.data?.requestId !== requestId) {
+                return;
+            }
+            procesarPayload(e.data.payload);
+        };
+
+        const alEvento = e => {
+            let payload = e.detail;
+            if (typeof payload === 'string') {
+                try {
+                    payload = JSON.parse(payload);
+                } catch {
+                    payload = null;
+                }
+            }
+            procesarPayload(payload);
+        };
+
+        const abortar = () => {
+            if (finalizado) return;
+            finalizado = true;
+            limpiar();
+            window.postMessage({ __maximus: 'bridge-abort', requestId }, location.origin || '*');
+            const err = new Error('Descarga detenida por el usuario');
+            err.esCancelacion = true;
+            reject(err);
+        };
+
+        estado.abortadoresActivos.add(abortar);
+
+        const timer = setTimeout(() => {
+            if (finalizado) return;
+            finalizado = true;
+            limpiar();
+            window.postMessage({ __maximus: 'bridge-abort', requestId }, location.origin || '*');
+            reject(new Error('Tiempo agotado'));
+        }, CFG.TIMEOUT);
+
+        window.addEventListener('message', alMensaje);
+        window.addEventListener(eventoRespuesta, alEvento, { once: true });
+        window.postMessage(
+            {
+                __maximus: 'bridge-fetch',
+                requestId,
+                url,
+                timeout: CFG.TIMEOUT,
+                maxBytes: CFG.MAX_MB * 1048576
+            },
+            location.origin || '*'
+        );
+    });
+}
+
 // Descarga mediante el Service Worker de la extensión (o GM_xmlhttpRequest en Tampermonkey) para saltar bloqueos CORS en servidores externos.
-function peticionExterna(url) {
+async function peticionExterna(url) {
     if (typeof GM_xmlhttpRequest === 'function') {
         return new Promise((resolve, reject) => {
             if (estado.cancelado) {
@@ -119,167 +303,23 @@ function peticionExterna(url) {
     }
 
     if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
-        return new Promise((resolve, reject) => {
-            if (estado.cancelado) {
-                const err = new Error('Descarga detenida por el usuario');
-                err.esCancelacion = true;
-                return reject(err);
+        try {
+            return await peticionViaRuntime(url);
+        } catch (err) {
+            if (err?.esCancelacion || estado.cancelado) throw err;
+            if (document.documentElement?.dataset?.maximusBridge === '1') {
+                return await peticionViaPuenteDom(url);
             }
-
-            let finalizado = false;
-            const requestId = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
-
-            const abortar = () => {
-                if (finalizado) return;
-                finalizado = true;
-                clearTimeout(timer);
-                estado.abortadoresActivos.delete(abortar);
-                try {
-                    chrome.runtime.sendMessage({ action: 'MAXIMUS_ABORT', requestId });
-                } catch {
-                    // Ignorar
-                }
-                const err = new Error('Descarga detenida por el usuario');
-                err.esCancelacion = true;
-                reject(err);
-            };
-
-            estado.abortadoresActivos.add(abortar);
-
-            const timer = setTimeout(() => {
-                if (finalizado) return;
-                finalizado = true;
-                estado.abortadoresActivos.delete(abortar);
-                try {
-                    chrome.runtime.sendMessage({ action: 'MAXIMUS_ABORT', requestId });
-                } catch {
-                    // Ignorar
-                }
-                reject(new Error('Tiempo agotado'));
-            }, CFG.TIMEOUT);
-
-            chrome.runtime.sendMessage(
-                {
-                    action: 'MAXIMUS_FETCH',
-                    requestId,
-                    url,
-                    timeout: CFG.TIMEOUT,
-                    maxBytes: CFG.MAX_MB * 1048576
-                },
-                respuesta => {
-                    if (finalizado) return;
-                    finalizado = true;
-                    clearTimeout(timer);
-                    estado.abortadoresActivos.delete(abortar);
-
-                    if (chrome.runtime.lastError) {
-                        return reject(new Error(chrome.runtime.lastError.message || 'Error en background'));
-                    }
-                    if (!respuesta || !respuesta.ok) {
-                        return reject(new Error(respuesta?.error || 'Error de red o CORS'));
-                    }
-
-                    try {
-                        const bytes = base64ABytes(respuesta.base64);
-                        if (!bytes.byteLength) {
-                            return reject(new Error('Archivo vacío'));
-                        }
-                        resolve({
-                            bytes,
-                            headers: respuesta.headers || {},
-                            url: respuesta.url || url
-                        });
-                    } catch (e) {
-                        reject(new Error(`Fallo al decodificar binario: ${e.message}`));
-                    }
-                }
-            );
-        });
+            throw err;
+        }
     }
 
     // Si el bundle corre en USER_SCRIPT o MAIN sin acceso directo a chrome.runtime, usa el puente DOM de content.js.
     if (document.documentElement?.dataset?.maximusBridge === '1') {
-        return new Promise((resolve, reject) => {
-            if (estado.cancelado) {
-                const err = new Error('Descarga detenida por el usuario');
-                err.esCancelacion = true;
-                return reject(err);
-            }
-
-            let finalizado = false;
-            const requestId = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
-            const eventoRespuesta = `maximus-bridge-res-${requestId}`;
-
-            const limpiar = () => {
-                clearTimeout(timer);
-                estado.abortadoresActivos.delete(abortar);
-                window.removeEventListener(eventoRespuesta, alResponder);
-            };
-
-            const abortar = () => {
-                if (finalizado) return;
-                finalizado = true;
-                limpiar();
-                window.dispatchEvent(
-                    new CustomEvent('maximus-bridge-abort', { detail: { requestId } })
-                );
-                const err = new Error('Descarga detenida por el usuario');
-                err.esCancelacion = true;
-                reject(err);
-            };
-
-            const alResponder = e => {
-                if (finalizado) return;
-                finalizado = true;
-                limpiar();
-
-                const respuesta = e.detail;
-                if (!respuesta || !respuesta.ok) {
-                    return reject(new Error(respuesta?.error || 'Error de red o CORS'));
-                }
-
-                try {
-                    const bytes = base64ABytes(respuesta.base64);
-                    if (!bytes.byteLength) {
-                        return reject(new Error('Archivo vacío'));
-                    }
-                    resolve({
-                        bytes,
-                        headers: respuesta.headers || {},
-                        url: respuesta.url || url
-                    });
-                } catch (err) {
-                    reject(new Error(`Fallo al decodificar binario: ${err.message}`));
-                }
-            };
-
-            estado.abortadoresActivos.add(abortar);
-
-            const timer = setTimeout(() => {
-                if (finalizado) return;
-                finalizado = true;
-                limpiar();
-                window.dispatchEvent(
-                    new CustomEvent('maximus-bridge-abort', { detail: { requestId } })
-                );
-                reject(new Error('Tiempo agotado'));
-            }, CFG.TIMEOUT);
-
-            window.addEventListener(eventoRespuesta, alResponder, { once: true });
-            window.dispatchEvent(
-                new CustomEvent('maximus-bridge-fetch', {
-                    detail: {
-                        requestId,
-                        url,
-                        timeout: CFG.TIMEOUT,
-                        maxBytes: CFG.MAX_MB * 1048576
-                    }
-                })
-            );
-        });
+        return await peticionViaPuenteDom(url);
     }
 
-    return fetchLocal(url);
+    return await fetchLocal(url);
 }
 
 async function fetchLocal(url) {
@@ -445,7 +485,7 @@ export function analizar(res) {
 
     // Firma PK (0x50 0x4B): puede ser un .zip normal o un documento de Office moderno (.docx, .xlsx, .pptx).
     if (b[0] === 80 && b[1] === 75 && [3, 5, 7].includes(b[2])) {
-        const urlExt = new URL(res.url).pathname
+        const urlExt = new URL(res.url, location.href).pathname
             .match(/\.(?:docx|xlsx|pptx|odt|ods|odp|epub|zip)$/i)?.[0]
             ?.toLowerCase();
         if (urlExt) return { tipo: 'archivo', ext: urlExt };
@@ -526,7 +566,7 @@ export function analizar(res) {
         return { tipo: 'archivo', ext: mimeExt[mime] };
     }
 
-    const extUrl = new URL(res.url).pathname
+    const extUrl = new URL(res.url, location.href).pathname
         .match(RE.archivo)?.[0]
         ?.toLowerCase();
 
@@ -573,7 +613,7 @@ export function archivoNombre(res, sugerido, tipo) {
 
     if (!RE.archivo.test(nombre)) {
         try {
-            const u = new URL(res.url);
+            const u = new URL(res.url, location.href);
             const deParam =
                 u.searchParams.get('filename') ||
                 u.searchParams

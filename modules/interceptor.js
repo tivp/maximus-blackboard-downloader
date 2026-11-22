@@ -42,12 +42,44 @@ export function activarInterceptorIframes() {
         }
     };
 
-    // Recibe las URLs que page-hook.js atrapa cuando Blackboard llama a window.open en el mundo principal.
-    window.addEventListener('maximus-popup-interceptado', e => {
-        if (estado.ocupado && e.detail?.url) {
-            registrarUrlPopup(e.detail.url);
+    if (window.__maximusPopupMsgListener) {
+        window.removeEventListener('message', window.__maximusPopupMsgListener);
+    }
+    if (window.__maximusPopupEvtListener) {
+        window.removeEventListener('maximus-popup-interceptado', window.__maximusPopupEvtListener);
+    }
+    if (window.__maximusIframeObserver) {
+        try {
+            window.__maximusIframeObserver.disconnect();
+        } catch {
+            // Ignorar si ya estaba desconectado.
         }
-    });
+    }
+
+    // Recibe las URLs que page-hook.js atrapa cuando Blackboard llama a window.open en el mundo principal.
+    window.__maximusPopupMsgListener = e => {
+        if (e.source !== window || !estado.ocupado) return;
+        if (e.data?.__maximus === 'popup' && e.data?.url) {
+            registrarUrlPopup(e.data.url);
+        }
+    };
+    window.addEventListener('message', window.__maximusPopupMsgListener);
+
+    window.__maximusPopupEvtListener = e => {
+        if (!estado.ocupado) return;
+        let detalle = e.detail;
+        if (typeof detalle === 'string') {
+            try {
+                detalle = JSON.parse(detalle);
+            } catch {
+                return;
+            }
+        }
+        if (detalle?.url) {
+            registrarUrlPopup(detalle.url);
+        }
+    };
+    window.addEventListener('maximus-popup-interceptado', window.__maximusPopupEvtListener);
 
     try {
         const nativoRAF = window.requestAnimationFrame.bind(window);
@@ -154,7 +186,7 @@ export function activarInterceptorIframes() {
         }
     };
 
-    new MutationObserver(mutaciones => {
+    window.__maximusIframeObserver = new MutationObserver(mutaciones => {
         if (!estado.ocupado) return;
         for (const m of mutaciones) {
             if (m.type === 'attributes' && m.target.tagName === 'IFRAME') {
@@ -170,10 +202,11 @@ export function activarInterceptorIframes() {
                 }
             }
         }
-    }).observe(document.documentElement, {
+    });
+    window.__maximusIframeObserver.observe(document.documentElement, {
         childList: true,
         subtree: true,
         attributes: true,
-        attributeFilter: ['src']
+        attributeFilter: ['src', 'ng-src']
     });
 }

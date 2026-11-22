@@ -1,6 +1,132 @@
 // Consulta directa a los endpoints REST de Blackboard (/learn/api/...) para sacar adjuntos sin abrir paneles en la interfaz.
 
+import { RE, estado } from './config.js';
 import { texto, limpiarPrefijoXid, esUrlScormOInteractivo, urlReal } from './utils.js';
+
+function esItemEvaluacionApi(item) {
+    if (!item) return false;
+    const titulo = texto(item.title || '');
+    const handler = String(
+        item.contentHandler?.id ||
+        Object.keys(item.contentDetail || {})[0] ||
+        ''
+    );
+
+    if (/asmt|assessment|assignment|test-link|quiz|exam|turnitin/i.test(handler)) {
+        return true;
+    }
+
+    if (
+        item.gradebookColumnId ||
+        item.hasGradebookColumns ||
+        item.assessmentId ||
+        item.isGradable ||
+        item.contentHandler?.gradeColumnId ||
+        item.contentDetail?.['resource/x-bb-asmt-test-link'] ||
+        item.contentDetail?.['resource/x-bb-assignment']
+    ) {
+        return true;
+    }
+
+    return Boolean(titulo && RE.itemEvaluacionTitulo.test(titulo) && !RE.encuestaOSondeo.test(titulo));
+}
+
+export async function consultarHijosContenidoApi(courseId, contentId) {
+    if (!courseId || !contentId) return null;
+
+    const cacheKey = `${courseId}:${contentId}`;
+    if (estado.evaluacionesCacheApi.has(cacheKey)) {
+        return estado.evaluacionesCacheApi.get(cacheKey);
+    }
+
+    const endpoints = [
+        `/learn/api/v1/courses/${courseId}/contents/${contentId}/children?limit=100`,
+        `/learn/api/public/v1/courses/${courseId}/contents/${contentId}/children?limit=100`
+    ];
+
+    for (const endpoint of endpoints) {
+        try {
+            const r = await fetch(endpoint, {
+                credentials: 'include',
+                headers: { Accept: 'application/json' }
+            });
+            if (!r.ok) continue;
+            const data = await r.json();
+            if (Array.isArray(data?.results)) {
+                estado.evaluacionesCacheApi.set(cacheKey, data.results);
+                return data.results;
+            }
+        } catch {
+            // Probar el siguiente endpoint disponible.
+        }
+    }
+
+    estado.evaluacionesCacheApi.set(cacheKey, null);
+    return null;
+}
+
+export async function inspeccionarEvaluacionesEnContenedorApi(courseId, contentId, profundidad = 0) {
+    if (!courseId || !contentId) {
+        return { resultado: 'desconocido', carpetasEvaluacionIds: [] };
+    }
+
+    const hijos = await consultarHijosContenidoApi(courseId, contentId);
+    if (!hijos) {
+        return { resultado: 'desconocido', carpetasEvaluacionIds: [] };
+    }
+
+    let encontrado = false;
+    const carpetasEvaluacionIds = [];
+    const subcarpetasPorRevisar = [];
+
+    for (const item of hijos) {
+        if (item?.availability?.available === 'No') continue;
+
+        const titulo = texto(item?.title || '');
+        const handler = String(
+            item?.contentHandler?.id ||
+            Object.keys(item?.contentDetail || {})[0] ||
+            ''
+        );
+        const esContenedor =
+            /folder|learning-module/i.test(handler) ||
+            Boolean(item?.hasChildren || item?.isFolder);
+
+        if (esContenedor) {
+            if (RE.carpetaEvaluacion.test(titulo) || RE.moduloFinal.test(titulo)) {
+                encontrado = true;
+                if (item.id) carpetasEvaluacionIds.push(item.id);
+            } else if (profundidad < 1 && item?.id) {
+                subcarpetasPorRevisar.push(item.id);
+            }
+        } else if (esItemEvaluacionApi(item)) {
+            encontrado = true;
+        }
+    }
+
+    if (profundidad < 1 && subcarpetasPorRevisar.length) {
+        const subResultados = await Promise.all(
+            subcarpetasPorRevisar.map(subId =>
+                inspeccionarEvaluacionesEnContenedorApi(courseId, subId, profundidad + 1).then(res => ({
+                    subId,
+                    res
+                }))
+            )
+        );
+
+        for (const { subId, res } of subResultados) {
+            if (res.resultado === 'si') {
+                encontrado = true;
+                carpetasEvaluacionIds.push(subId, ...res.carpetasEvaluacionIds);
+            }
+        }
+    }
+
+    return {
+        resultado: encontrado ? 'si' : 'no',
+        carpetasEvaluacionIds
+    };
+}
 
 export async function extraerDocumentoViaApiBlackboard(courseId, docId, nombreItem = 'Documento') {
     if (!courseId || !docId) return null;
@@ -95,6 +221,19 @@ export async function extraerDocumentoViaApiBlackboard(courseId, docId, nombreIt
                     itemObj.links?.find(l => /download|file|bbcswebdav/i.test(l.href || ''))?.href;
                 agregarUrlDetectada(fileUrl, titulo, fileObj.fileName || '');
             }
+
+            if (Array.isArray(itemObj.attachments)) {
+                for (const att of itemObj.attachments) {
+                    const attUrl =
+                        att.permanentUrl ||
+                        att.viewUrl ||
+                        att.downloadUrl ||
+                        (att.xid ? `/bbcswebdav/xid-${String(att.xid).replace(/^xid-/i, '')}` : '');
+                    if (attUrl) {
+                        agregarUrlDetectada(attUrl, att.fileName || titulo, att.fileName || '');
+                    }
+                }
+            }
         };
 
         // Los documentos Ultra guardan su contenido como HTML dentro de body.rawText; ahí van metidos los metadatos JSON en data-bbfile.
@@ -133,24 +272,71 @@ export async function extraerDocumentoViaApiBlackboard(courseId, docId, nombreIt
         };
 
         // Consultamos a la vez la API interna de Ultra y la pública v1 porque según el rol del alumno algunas propiedades solo vienen en una de las dos.
-        const [nodoInterno, nodoPublico, datosInternos, datosPublicos, adjuntosPublicos] = await Promise.all([
+        const [nodoInterno, nodoPublico, datosInternos, datosPublicos, adjuntosInternos, adjuntosPublicos] = await Promise.all([
             fetchJson(`/learn/api/v1/courses/${courseId}/contents/${docId}`),
             fetchJson(`/learn/api/public/v1/courses/${courseId}/contents/${docId}`),
             fetchJson(`/learn/api/v1/courses/${courseId}/contents/${docId}/children`),
             fetchJson(`/learn/api/public/v1/courses/${courseId}/contents/${docId}/children`),
+            fetchJson(`/learn/api/v1/courses/${courseId}/contents/${docId}/attachments`),
             fetchJson(`/learn/api/public/v1/courses/${courseId}/contents/${docId}/attachments`)
         ]);
 
+        const textosAcumulados = [];
+
         extraerDeItemApi(nodoInterno);
         extraerDeItemApi(nodoPublico);
+
+        for (const nodo of [nodoInterno, nodoPublico]) {
+            const cuerpoNodo =
+                nodo?.body?.rawText ||
+                (typeof nodo?.body === 'string' ? nodo.body : '') ||
+                nodo?.contentDetail?.['resource/x-bb-document']?.body?.rawText ||
+                '';
+            if (typeof cuerpoNodo === 'string' && cuerpoNodo) {
+                const txt = procesarHtmlCuerpo(cuerpoNodo, nombreItem);
+                if (txt && txt.length > 10 && !textosAcumulados.includes(txt)) {
+                    textosAcumulados.push(txt);
+                }
+            }
+        }
 
         if (esScormInteractivo) {
             return [{ omitidoInteractivo: true }];
         }
 
-        if (adjuntosPublicos?.results?.length) {
-            for (const att of adjuntosPublicos.results) {
-                const dlUrl = `/learn/api/public/v1/courses/${courseId}/contents/${docId}/attachments/${att.id}/download`;
+        const procesarAdjuntos = (listaInt, listaPub, contentIdObj) => {
+            const porId = new Map();
+            const sinId = [];
+            for (const att of [...(listaPub || []), ...(listaInt || [])]) {
+                if (!att) continue;
+                if (att.id) {
+                    const prev = porId.get(att.id) || {};
+                    porId.set(att.id, {
+                        ...prev,
+                        ...att,
+                        permanentUrl: att.permanentUrl || prev.permanentUrl,
+                        viewUrl: att.viewUrl || prev.viewUrl,
+                        downloadUrl: att.downloadUrl || prev.downloadUrl,
+                        xid: att.xid || prev.xid,
+                        fileName: att.fileName || prev.fileName
+                    });
+                } else {
+                    sinId.push(att);
+                }
+            }
+            return [...porId.values(), ...sinId].map(att => ({
+                att,
+                dlUrl:
+                    att.permanentUrl ||
+                    att.viewUrl ||
+                    att.downloadUrl ||
+                    (att.xid ? `/bbcswebdav/xid-${String(att.xid).replace(/^xid-/i, '')}` : '') ||
+                    (att.id ? `/learn/api/public/v1/courses/${courseId}/contents/${contentIdObj}/attachments/${att.id}/download` : '')
+            }));
+        };
+
+        for (const { att, dlUrl } of procesarAdjuntos(adjuntosInternos?.results, adjuntosPublicos?.results, docId)) {
+            if (dlUrl) {
                 agregarUrlDetectada(dlUrl, att.fileName, att.fileName);
             }
         }
@@ -160,8 +346,6 @@ export async function extraerDocumentoViaApiBlackboard(courseId, docId, nombreIt
             datosPublicos?.results ||
             [];
 
-        const textosAcumulados = [];
-
         for (const hijo of listaHijos) {
             const tituloHijo = texto(hijo.title || '');
             const handler = hijo.contentHandler?.id || '';
@@ -169,12 +353,14 @@ export async function extraerDocumentoViaApiBlackboard(courseId, docId, nombreIt
             extraerDeItemApi(hijo);
 
             if (hijo.id && /file|document|externallink/i.test(handler)) {
-                const subAtt = await fetchJson(
+                const subAttPub = await fetchJson(
                     `/learn/api/public/v1/courses/${courseId}/contents/${hijo.id}/attachments`
                 );
-                if (subAtt?.results?.length) {
-                    for (const att of subAtt.results) {
-                        const dlUrl = `/learn/api/public/v1/courses/${courseId}/contents/${hijo.id}/attachments/${att.id}/download`;
+                const subAttInt = !subAttPub?.results?.length
+                    ? await fetchJson(`/learn/api/v1/courses/${courseId}/contents/${hijo.id}/attachments`)
+                    : null;
+                for (const { att, dlUrl } of procesarAdjuntos(subAttInt?.results, subAttPub?.results, hijo.id)) {
+                    if (dlUrl) {
                         agregarUrlDetectada(dlUrl, tituloHijo || att.fileName, att.fileName);
                     }
                 }
@@ -182,13 +368,13 @@ export async function extraerDocumentoViaApiBlackboard(courseId, docId, nombreIt
 
             const cuerpoHtml =
                 hijo.body?.rawText ||
-                hijo.body ||
+                (typeof hijo.body === 'string' ? hijo.body : '') ||
                 hijo.contentDetail?.['resource/x-bb-document']?.body?.rawText ||
                 '';
 
             if (typeof cuerpoHtml === 'string' && cuerpoHtml) {
                 const txt = procesarHtmlCuerpo(cuerpoHtml, tituloHijo);
-                if (txt && txt.length > 10) {
+                if (txt && txt.length > 10 && !textosAcumulados.includes(txt)) {
                     textosAcumulados.push(txt);
                 }
             }

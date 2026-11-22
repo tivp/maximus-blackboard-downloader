@@ -23,9 +23,14 @@
         const nativoWindowOpen = window.open.bind(window);
         window.open = function (url, ...args) {
             if (estaOcupado() && url) {
+                const urlStr = String(url);
+                window.postMessage(
+                    { __maximus: 'popup', url: urlStr },
+                    location.origin || '*'
+                );
                 window.dispatchEvent(
                     new CustomEvent('maximus-popup-interceptado', {
-                        detail: { url: String(url) }
+                        detail: JSON.stringify({ url: urlStr })
                     })
                 );
                 return null;

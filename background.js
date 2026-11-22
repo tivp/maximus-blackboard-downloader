@@ -237,9 +237,7 @@ chrome.runtime.onInstalled.addListener(() => {
     asegurarUserScriptDesdeCache().catch(() => {});
 });
 
-chrome.runtime.onMessage.addListener((mensaje, sender, enviarRespuesta) => {
-    if (!mensaje || typeof mensaje !== 'object') return false;
-
+function manejarMensajeRed(mensaje, enviarRespuesta) {
     if (mensaje.action === 'MAXIMUS_ABORT') {
         const ctrl = controladoresActivos.get(mensaje.requestId);
         if (ctrl) {
@@ -291,18 +289,33 @@ chrome.runtime.onMessage.addListener((mensaje, sender, enviarRespuesta) => {
                     headers[clave.toLowerCase()] = valor;
                 });
 
-                enviarRespuesta({
-                    ok: true,
-                    base64: bufferABase64(buffer),
-                    headers,
-                    url: r.url || url
-                });
+                try {
+                    enviarRespuesta({
+                        ok: true,
+                        base64: bufferABase64(buffer),
+                        headers,
+                        url: r.url || url
+                    });
+                } catch {
+                    try {
+                        enviarRespuesta({
+                            ok: false,
+                            error: 'Archivo excede el límite de mensajería de Chrome'
+                        });
+                    } catch {
+                        // Canal cerrado si la pestaña se cerró antes de responder.
+                    }
+                }
             })
             .catch(err => {
-                enviarRespuesta({
-                    ok: false,
-                    error: err?.name === 'AbortError' ? 'Tiempo agotado o cancelado' : (err?.message || 'Error de red')
-                });
+                try {
+                    enviarRespuesta({
+                        ok: false,
+                        error: err?.name === 'AbortError' ? 'Tiempo agotado o cancelado' : (err?.message || 'Error de red')
+                    });
+                } catch {
+                    // Canal cerrado si la pestaña se cerró antes de responder.
+                }
             })
             .finally(() => {
                 clearTimeout(reloj);
@@ -310,6 +323,17 @@ chrome.runtime.onMessage.addListener((mensaje, sender, enviarRespuesta) => {
             });
 
         return true;
+    }
+
+    return null;
+}
+
+chrome.runtime.onMessage.addListener((mensaje, sender, enviarRespuesta) => {
+    if (!mensaje || typeof mensaje !== 'object') return false;
+
+    const red = manejarMensajeRed(mensaje, enviarRespuesta);
+    if (red !== null) {
+        return red;
     }
 
     if (mensaje.action === 'MAXIMUS_GET_STATUS') {
@@ -362,3 +386,11 @@ chrome.runtime.onMessage.addListener((mensaje, sender, enviarRespuesta) => {
 
     return false;
 });
+
+if (chrome.runtime?.onUserScriptMessage?.addListener) {
+    chrome.runtime.onUserScriptMessage.addListener((mensaje, sender, enviarRespuesta) => {
+        if (!mensaje || typeof mensaje !== 'object') return false;
+        const red = manejarMensajeRed(mensaje, enviarRespuesta);
+        return red === true;
+    });
+}

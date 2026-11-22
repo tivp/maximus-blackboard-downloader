@@ -11,9 +11,12 @@ import {
     posicion,
     urlReal,
     esperarHasta,
+    compatible,
+    obtenerIdCursoActual,
     tituloEl
 } from './utils.js';
 import { enVistaDocumentoPantallaCompleta } from './interceptor.js';
+import { inspeccionarEvaluacionesEnContenedorApi } from './api.js';
 
 // Saca los bloques de archivo (videos, PDFs, enlaces de Ally) que vienen dentro de un document-panel de Blackboard Ultra.
 export function extraerBloquesDeDocumentPanel(raizDoc = document) {
@@ -864,4 +867,404 @@ export function reconectarElementoRecurso(r, u) {
     }
 
     return r.el?.isConnected ? r.el : null;
+}
+
+export function estaTarjetaBloqueada(card, btn = null) {
+    if (!card) return true;
+    if (btn) {
+        if (
+            btn.disabled ||
+            btn.getAttribute('aria-disabled') === 'true' ||
+            btn.matches('[class*="readOnly"], [class*="isRestricted"]')
+        ) {
+            return true;
+        }
+    }
+
+    return [...card.querySelectorAll('[data-analytics-id="components.common.conditional-release-info.buttonBase"]')].some(
+        el => el.closest(TARJETAS) === card
+    );
+}
+
+export function esModuloCard(card) {
+    if (!card) return false;
+    return [
+        ...card.querySelectorAll(
+            'button[id^="learning-module-title-"], [data-analytics-id="course.learning.module.base.item.toggleLm.button"]'
+        )
+    ].some(el => el.closest(TARJETAS) === card);
+}
+
+export function esCarpetaEvaluacion(card, btn = null) {
+    if (!card) return false;
+
+    const btnCarpeta =
+        (btn && btn.closest(TARJETAS) === card ? btn : null) ||
+        [
+            ...card.querySelectorAll(
+                'button[id^="folder-title-"], [data-analytics-id="content.item.folder.toggleFolder.button"]'
+            )
+        ].find(el => el.closest(TARJETAS) === card) ||
+        null;
+
+    const nombre = tituloEl(btnCarpeta) || nombreCard(card);
+    if (!nombre) return false;
+
+    return Boolean(
+        (btnCarpeta || esCarpeta(card, nombre)) &&
+        (RE.carpetaEvaluacion.test(nombre) || RE.moduloFinal.test(nombre))
+    );
+}
+
+export function obtenerContenedorFilaEvaluacion(card) {
+    if (!card) return null;
+
+    const directo = [...card.querySelectorAll('.click-to-invoke-container')].find(
+        el => el.closest(TARJETAS) === card
+    );
+    if (directo) return directo;
+
+    const contentItem = [...card.querySelectorAll('[class*="contentItem-"]')].find(
+        el => el.closest(TARJETAS) === card
+    );
+    if (contentItem) return contentItem;
+
+    return card.querySelector(':scope > .outline-item-inner, :scope > [class*="itemContainer"]') || card;
+}
+
+export function esElementoEvaluacionEnNodo(raiz, card = null) {
+    if (!raiz) return false;
+    const esPropio = el => !card || el.closest(TARJETAS) === card;
+
+    if (
+        [
+            ...raiz.querySelectorAll(
+                'a[href*="/assessment/"], a[href*="/assignment/"], button[href*="/assessment/"], [data-analytics-id*="gradebook.item"]'
+            )
+        ].some(esPropio)
+    ) {
+        return true;
+    }
+
+    if (
+        [...raiz.querySelectorAll('svg[aria-label]')].some(
+            el =>
+                esPropio(el) &&
+                /^(?:examen|prueba|evaluaci[oó]n|cuestionario|actividad|tarea|test|exam|quiz|assignment)$/i.test(
+                    texto(el.getAttribute('aria-label'))
+                )
+        )
+    ) {
+        return true;
+    }
+
+    if (
+        [...raiz.querySelectorAll('a[aria-label], button[aria-label], .ax-focusable-title[aria-label]')].some(
+            el =>
+                esPropio(el) &&
+                /^(?:examen|prueba|evaluaci[oó]n|cuestionario|actividad|tarea|test|exam|quiz|assignment)\s*,/i.test(
+                    texto(el.getAttribute('aria-label'))
+                )
+        )
+    ) {
+        return true;
+    }
+
+    if ([...raiz.querySelectorAll('[class*="gradeInfo-"], [class*="gradeDetail-"]')].some(esPropio)) {
+        return true;
+    }
+
+    return [...raiz.querySelectorAll('.ax-focusable-title, a[href], button')].some(el => {
+        if (!esPropio(el)) return false;
+        if (
+            el.matches(
+                '.js-review-state-icon-button, [id^="content-item-overflow-menu-button-"], [data-analytics-id="components.common.conditional-release-info.buttonBase"], [aria-haspopup], button[aria-label*="opciones" i], button[aria-label*="more" i]'
+            )
+        ) {
+            return false;
+        }
+        const t = tituloEl(el);
+        return Boolean(t && RE.itemEvaluacionTitulo.test(t) && !RE.encuestaOSondeo.test(t));
+    });
+}
+
+export function esTarjetaEvaluacion(card) {
+    if (!card) return false;
+    if (
+        card.closest(
+            '[data-maximus], document-panel, section.page-scorm-launch-frame, learning-module-panel-view, content-page-header, nav, .MuiBreadcrumbs-root'
+        )
+    ) {
+        return false;
+    }
+
+    const nombre = nombreCard(card);
+    if (esModuloCard(card) || esCarpeta(card, nombre)) {
+        return false;
+    }
+
+    if (esElementoEvaluacionEnNodo(card, card)) {
+        return true;
+    }
+
+    if (nombre && RE.encuestaOSondeo.test(nombre)) {
+        return false;
+    }
+
+    for (let p = card.parentElement?.closest(TARJETAS); p; p = p.parentElement?.closest(TARJETAS)) {
+        if (esCarpetaEvaluacion(p) || (esModuloCard(p) && RE.moduloFinal.test(nombreCard(p)))) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+export function reiniciarEstadoEvaluacionesSiCambioCurso() {
+    const cidCurso = obtenerIdCursoActual();
+    if (cidCurso !== estado.evaluacionesCursoId) {
+        estado.evaluacionesCursoId = cidCurso;
+        estado.evaluacionesColapsadasUsuario.clear();
+        estado.evaluacionesModulosSinEval.clear();
+        estado.evaluacionesCarpetasConEval.clear();
+        estado.evaluacionesCacheApi.clear();
+        estado.evaluacionesBotonesAutoAbiertos = new WeakSet();
+    }
+}
+
+export function enVistaOutlineCurso() {
+    return (
+        compatible() &&
+        !enVistaDocumentoPantallaCompleta() &&
+        !/\/ultra\/courses\/[^/]+\/(?:assessment|discussion|grades|announcements|messages|roster|calendar)\b/i.test(
+            location.pathname
+        ) &&
+        !!document.querySelector(TARJETAS)
+    );
+}
+
+export async function desplegarEvaluacionesAutomaticamente(alActualizar = null) {
+    reiniciarEstadoEvaluacionesSiCambioCurso();
+
+    if (!enVistaOutlineCurso() || estado.ocupado) {
+        return;
+    }
+
+    if (estado.evaluacionesEnCurso) {
+        estado.evaluacionesReintentar = true;
+        return;
+    }
+
+    estado.evaluacionesEnCurso = true;
+    estado.evaluacionesReintentar = false;
+
+    const courseIdInicial = obtenerIdCursoActual();
+    const debeAbortar = () =>
+        estado.ocupado ||
+        !enVistaOutlineCurso() ||
+        obtenerIdCursoActual() !== courseIdInicial;
+
+    const esperarHijosContenedor = async (card, btn, hijosAntes, ms = 2500) => {
+        await esperarHasta(
+            () =>
+                debeAbortar() ||
+                !btn.isConnected ||
+                (btn.getAttribute('aria-expanded') === 'true' &&
+                    !card.querySelector('.ms-Spinner, [data-testid="skeleton-loader"]') &&
+                    card.querySelectorAll(TARJETAS).length > hijosAntes),
+            ms
+        );
+    };
+
+    const expandirCarpetasEvaluacionVisibles = async () => {
+        for (let ronda = 0; ronda < 4; ronda++) {
+            if (debeAbortar()) return;
+
+            const selectorCarpetas =
+                'button[id^="folder-title-"][aria-expanded="false"],' +
+                '[data-analytics-id="content.item.folder.toggleFolder.button"][aria-expanded="false"],' +
+                'button[aria-expanded="false"],[role="button"][aria-expanded="false"]';
+
+            const pendientes = [...document.querySelectorAll(selectorCarpetas)].filter(btn => {
+                if (!visible(btn)) return false;
+                if (
+                    btn.closest(
+                        '[data-maximus], document-panel, section.page-scorm-launch-frame, learning-module-panel-view, content-page-header, nav, .MuiBreadcrumbs-root, .MuiDrawer-root'
+                    )
+                ) {
+                    return false;
+                }
+                if (
+                    btn.matches(
+                        'button[id^="learning-module-title-"], [data-analytics-id="course.learning.module.base.item.toggleLm.button"], .js-review-state-icon-button, [id^="content-item-overflow-menu-button-"], [data-analytics-id="components.common.conditional-release-info.buttonBase"], [aria-haspopup]'
+                    )
+                ) {
+                    return false;
+                }
+                if (estado.evaluacionesBotonesAutoAbiertos.has(btn)) return false;
+
+                const card = btn.closest(TARJETAS);
+                if (!card || estaTarjetaBloqueada(card, btn)) return false;
+
+                const cid = card.getAttribute('data-content-id') || '';
+                if (cid && estado.evaluacionesColapsadasUsuario.has(cid)) return false;
+
+                return (
+                    esCarpetaEvaluacion(card, btn) ||
+                    Boolean(cid && estado.evaluacionesCarpetasConEval.has(cid))
+                );
+            });
+
+            if (!pendientes.length) break;
+
+            let abrioAlguno = false;
+            for (const btn of pendientes) {
+                if (debeAbortar()) return;
+                if (!btn.isConnected || btn.getAttribute('aria-expanded') !== 'false') continue;
+
+                const card = btn.closest(TARJETAS);
+                if (!card) continue;
+
+                const hijosAntes = card.querySelectorAll(TARJETAS).length;
+                estado.evaluacionesBotonesAutoAbiertos.add(btn);
+                btn.click();
+                abrioAlguno = true;
+
+                await esperarHijosContenedor(card, btn, hijosAntes);
+                if (debeAbortar()) return;
+                alActualizar?.();
+            }
+
+            if (!abrioAlguno) break;
+            await dormir(150);
+        }
+    };
+
+    try {
+        await expandirCarpetasEvaluacionVisibles();
+        if (debeAbortar()) return;
+        alActualizar?.();
+
+        const selectorCandidatos =
+            'button[id^="learning-module-title-"][aria-expanded="false"],' +
+            '[data-analytics-id="course.learning.module.base.item.toggleLm.button"][aria-expanded="false"],' +
+            'button[id^="folder-title-"][aria-expanded="false"],' +
+            '[data-analytics-id="content.item.folder.toggleFolder.button"][aria-expanded="false"]';
+
+        const candidatos = [];
+        const cardsVistas = new Set();
+
+        for (const btn of document.querySelectorAll(selectorCandidatos)) {
+            if (!visible(btn)) continue;
+            if (
+                btn.closest(
+                    '[data-maximus], document-panel, section.page-scorm-launch-frame, learning-module-panel-view, content-page-header, nav, .MuiBreadcrumbs-root, .MuiDrawer-root'
+                )
+            ) {
+                continue;
+            }
+            if (estado.evaluacionesBotonesAutoAbiertos.has(btn)) continue;
+
+            const card = btn.closest(TARJETAS);
+            if (!card || cardsVistas.has(card) || estaTarjetaBloqueada(card, btn)) continue;
+
+            const esModulo = btn.matches(
+                'button[id^="learning-module-title-"], [data-analytics-id="course.learning.module.base.item.toggleLm.button"]'
+            );
+            if (!esModulo && card.parentElement?.closest(TARJETAS)) continue;
+
+            const cid = card.getAttribute('data-content-id') || '';
+            if (cid && (estado.evaluacionesColapsadasUsuario.has(cid) || estado.evaluacionesModulosSinEval.has(cid))) {
+                continue;
+            }
+
+            cardsVistas.add(card);
+            candidatos.push({
+                btn,
+                card,
+                cid,
+                nombre: tituloEl(btn) || nombreCard(card)
+            });
+        }
+
+        if (candidatos.length) {
+            const inspecciones = await Promise.all(
+                candidatos.map(async item => {
+                    if (RE.carpetaEvaluacion.test(item.nombre) || RE.moduloFinal.test(item.nombre)) {
+                        return { ...item, info: { resultado: 'si', carpetasEvaluacionIds: [] } };
+                    }
+                    const info = await inspeccionarEvaluacionesEnContenedorApi(courseIdInicial, item.cid);
+                    return { ...item, info };
+                })
+            );
+
+            for (const { btn, card, cid, info } of inspecciones) {
+                if (debeAbortar()) return;
+                if (!btn.isConnected || !card.isConnected || btn.getAttribute('aria-expanded') !== 'false') {
+                    continue;
+                }
+                if (cid && estado.evaluacionesColapsadasUsuario.has(cid)) continue;
+
+                if (info.resultado === 'no') {
+                    if (cid) estado.evaluacionesModulosSinEval.add(cid);
+                    continue;
+                }
+
+                if (info.resultado === 'si') {
+                    for (const subId of info.carpetasEvaluacionIds) {
+                        if (subId) estado.evaluacionesCarpetasConEval.add(subId);
+                    }
+                    const hijosAntes = card.querySelectorAll(TARJETAS).length;
+                    estado.evaluacionesBotonesAutoAbiertos.add(btn);
+                    btn.click();
+
+                    await esperarHijosContenedor(card, btn, hijosAntes);
+                    if (debeAbortar()) return;
+                    await expandirCarpetasEvaluacionVisibles();
+                    if (debeAbortar()) return;
+                    alActualizar?.();
+                    continue;
+                }
+
+                // Respaldo cuando la API REST no está disponible: abrir, revisar hijos y volver a cerrar si no hay evaluaciones.
+                const hijosAntes = card.querySelectorAll(TARJETAS).length;
+                estado.evaluacionesBotonesAutoAbiertos.add(btn);
+                btn.click();
+
+                await esperarHijosContenedor(card, btn, hijosAntes);
+                if (debeAbortar()) return;
+
+                const hijos = [...card.querySelectorAll(TARJETAS)].filter(h => h !== card);
+                const tieneEvaluacion = hijos.some(
+                    h => esCarpetaEvaluacion(h) || esTarjetaEvaluacion(h)
+                );
+
+                if (tieneEvaluacion) {
+                    await expandirCarpetasEvaluacionVisibles();
+                    if (debeAbortar()) return;
+                    alActualizar?.();
+                } else {
+                    if (btn.isConnected && btn.getAttribute('aria-expanded') === 'true') {
+                        btn.click();
+                        await dormir(120);
+                    }
+                    if (cid) estado.evaluacionesModulosSinEval.add(cid);
+                }
+            }
+        }
+
+        if (!debeAbortar()) {
+            await expandirCarpetasEvaluacionVisibles();
+            if (!debeAbortar()) alActualizar?.();
+        }
+    } finally {
+        const reintentar = estado.evaluacionesReintentar;
+        estado.evaluacionesEnCurso = false;
+        estado.evaluacionesReintentar = false;
+        if (reintentar && !estado.ocupado && enVistaOutlineCurso()) {
+            setTimeout(() => {
+                desplegarEvaluacionesAutomaticamente(alActualizar);
+            }, 350);
+        }
+    }
 }

@@ -1,6 +1,6 @@
 // Montaje de paneles en cada unidad, botón general del curso, reconexión tras vistas completas y arranque del observador.
 
-import { CFG, LOGO_BASE64, TARJETAS, estado, cancelarDescargaActiva } from './config.js';
+import { CFG, TARJETAS, estado, cancelarDescargaActiva } from './config.js';
 import {
     dormir,
     canon,
@@ -15,7 +15,8 @@ import {
     cabeceras,
     buscarRaiz,
     anclaAncha,
-    expandirCarpetas
+    expandirCarpetas,
+    desplegarEvaluacionesAutomaticamente
 } from './scanner.js';
 import { registrarRehidratador } from './visor.js';
 import {
@@ -25,7 +26,8 @@ import {
     crearPiezas,
     pieza,
     restaurarColoresFilas,
-    limpiarPanelesEnVistaDocumento
+    limpiarPanelesEnVistaDocumento,
+    marcarEvaluaciones
 } from './ui.js';
 import {
     ejecutar,
@@ -40,7 +42,6 @@ export function montar(u) {
 
     panel.innerHTML = `
         <button class="maximus-boton" type="button">
-            <img class="maximus-logo" src="${LOGO_BASE64}" alt="">
             <span class="maximus-boton-texto">Descargar .zip</span>
         </button>
         <div class="maximus-barra">
@@ -174,7 +175,6 @@ export function sincronizarBotonCurso() {
 
     panel.innerHTML = `
         <button class="maximus-boton" type="button">
-            <img class="maximus-logo" src="${LOGO_BASE64}" alt="">
             <span class="maximus-boton-texto">Descargar todo el curso</span>
         </button>
         <div class="maximus-barra">
@@ -255,6 +255,7 @@ export function descubrir() {
     }
 
     restaurarColoresFilas();
+    marcarEvaluaciones();
 
     if (estado.ocupado) {
         return;
@@ -304,6 +305,7 @@ export function descubrir() {
     }
 
     sincronizarBotonCurso();
+    desplegarEvaluacionesAutomaticamente(marcarEvaluaciones);
 }
 
 export async function rehidratarDomCurso(uActiva = null, pcActivo = null) {
@@ -382,6 +384,66 @@ export async function rehidratarDomCurso(uActiva = null, pcActivo = null) {
     }
 
     restaurarColoresFilas();
+    marcarEvaluaciones();
+}
+
+export function registrarControlColapsoEvaluaciones() {
+    if (window.__maximusClickEvalListener) {
+        document.removeEventListener('click', window.__maximusClickEvalListener, true);
+    }
+
+    const selectorBotonesToggle =
+        'button[id^="learning-module-title-"],' +
+        '[data-analytics-id="course.learning.module.base.item.toggleLm.button"],' +
+        'button[id^="folder-title-"],' +
+        '[data-analytics-id="content.item.folder.toggleFolder.button"],' +
+        'button[aria-expanded],' +
+        '[role="button"][aria-expanded]';
+
+    const selectorIgnorarBtn =
+        '.js-review-state-icon-button,' +
+        '[id^="content-item-overflow-menu-button-"],' +
+        '[data-analytics-id="components.common.conditional-release-info.buttonBase"]';
+
+    const manejarClick = e => {
+        if (!e.isTrusted) return;
+        const target = e.target;
+        if (!target?.closest) return;
+        if (target.closest(`[data-maximus], ${selectorIgnorarBtn}`)) return;
+
+        const card = target.closest(TARJETAS);
+        if (!card) return;
+
+        const btnDirecto = target.closest(selectorBotonesToggle);
+        let btn = btnDirecto && btnDirecto.closest(TARJETAS) === card ? btnDirecto : null;
+
+        if (!btn) {
+            const cabecera = target.closest(
+                '.outline-item-inner, .click-to-invoke-container, [class*="learningModuleItem"], [class*="itemContainer"]'
+            );
+            if (!cabecera || cabecera.closest(TARJETAS) !== card) return;
+            if (cabecera.matches('[class*="itemContainer"]') && cabecera.querySelector(TARJETAS)) return;
+
+            btn = [...cabecera.querySelectorAll(selectorBotonesToggle)].find(
+                b => b.closest(TARJETAS) === card && !b.matches(selectorIgnorarBtn)
+            );
+        }
+
+        if (!btn || btn.matches(selectorIgnorarBtn)) return;
+
+        const cid = card.getAttribute('data-content-id') || '';
+        if (!cid) return;
+
+        const expandido = btn.getAttribute('aria-expanded');
+        if (expandido === 'true') {
+            estado.evaluacionesColapsadasUsuario.add(cid);
+        } else if (expandido === 'false') {
+            estado.evaluacionesColapsadasUsuario.delete(cid);
+        }
+    };
+
+    window.__maximusClickEvalListener = manejarClick;
+    document.addEventListener('click', manejarClick, true);
 }
 
 export function agendar() {
@@ -412,12 +474,21 @@ export function iniciar() {
     document.querySelectorAll('.maximus-panel').forEach(p => p.remove());
     estado.unidades.clear();
     estado.panelCurso = null;
+    estado.evaluacionesCursoId = '';
+    estado.evaluacionesEnCurso = false;
+    estado.evaluacionesReintentar = false;
+    estado.evaluacionesColapsadasUsuario.clear();
+    estado.evaluacionesModulosSinEval.clear();
+    estado.evaluacionesCarpetasConEval.clear();
+    estado.evaluacionesCacheApi.clear();
+    estado.evaluacionesBotonesAutoAbiertos = new WeakSet();
     if (document.documentElement) {
         document.documentElement.dataset.maximusIniciado = '1';
     }
 
     registrarRehidratador(rehidratarDomCurso);
     registrarAgendador(agendar);
+    registrarControlColapsoEvaluaciones();
 
     activarInterceptorIframes();
     inyectarCss();

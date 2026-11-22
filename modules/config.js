@@ -24,7 +24,10 @@ export const RE = {
     descarga: /bbcswebdav|xythos|\/attachments?\/|\/download(?:[/?#]|$)|filedownload|xid-\d+|[?&](?:download|filename|attachment|isForcedDownload|file)=/i,
     interactivo: /\b(?:material(?:es)?|contenido|recurso(?:s)?)\s+interactiv[oa]s?\b|\b(?:scorm|h5p|unity|webgl)\b/i,
     excluir: /^(?:(?:[usm]\d+\s*[|:]\s*)?(?:foro(?:\s+de\s+discusi[oó]n)?|evaluaci[oó]n(?:\s+diagn[oó]stica)?|examen|sondeo.*|encuesta.*)|foro de discusi[oó]n|consultas sobre la asignatura|asistente virtual|sondeo de conocimientos.*)$/i,
-    carpeta: /^(?:(?:[usm]\d+\s*[|:]\s*)?(?:material de estudio|material en otros formatos|actividades|evaluaci[oó]n(?: de la (?:unidad|semana))?.*|recursos(?:\s+de\s+aprendizaje.*)?|material complementario))$/i
+    carpeta: /^(?:(?:[usm]\d+\s*[|:]\s*)?(?:material de estudio|material en otros formatos|actividades|evaluaci[oó]n(?: de la (?:unidad|semana))?.*|recursos(?:\s+de\s+aprendizaje.*)?|material complementario))$/i,
+    carpetaEvaluacion: /^(?:(?:[usm]\d+\s*[|:\-–—]\s*)?(?:evaluaci[oó]n(?:es)?(?:\s+(?:de\s+la\s+(?:unidad|semana)|sumativa|formativa|diagn[oó]stica|parcial|final|semanal|n?°?\s*\d+|[ivx]+))?|ex[aá]men(?:es)?(?:\s+final)?|pruebas?(?:\s+y\s+evaluaciones)?))$/i,
+    itemEvaluacionTitulo: /^(?:[usm]\d+\s*[|:\-–—]\s*)?(?:evaluaci[oó]n(?:\s+(?:diagn[oó]stica|formativa|sumativa|parcial|final|semanal|de\s+la\s+(?:unidad|semana)|n?°?\s*\d+|[ivx]+))?|prueba(?:\s+(?:n?°?\s*)?\d+|\s+[ivx]+)?|examen(?:\s+final)?|certamen(?:\s+\d+)?|solemne(?:\s+\d+)?|cuestionario(?:\s+(?:evaluado|\d+))?|control(?:\s+\d+)?)\b/i,
+    encuestaOSondeo: /\b(?:encuesta|sondeo)\b/i
 };
 
 export const TARJETAS = '.content-list-item[data-content-id],.element-card.outline-item';
@@ -40,7 +43,15 @@ export const estado = {
     pendiente: false,
     ultimaUrlIframeInterceptada: '',
     ultimoInteractivoDetectado: false,
-    abortadoresActivos: new Set()
+    abortadoresActivos: new Set(),
+    evaluacionesCursoId: '',
+    evaluacionesEnCurso: false,
+    evaluacionesReintentar: false,
+    evaluacionesColapsadasUsuario: new Set(),
+    evaluacionesModulosSinEval: new Set(),
+    evaluacionesCarpetasConEval: new Set(),
+    evaluacionesCacheApi: new Map(),
+    evaluacionesBotonesAutoAbiertos: new WeakSet()
 };
 
 // Sincroniza el atributo en <html> para que page-hook.js sepa cuándo hay una descarga en curso.

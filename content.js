@@ -7,13 +7,7 @@
         document.documentElement.dataset.maximusBridge = '1';
     }
 
-    // Reenvía peticiones binarias CORS desde el script actualizado al Service Worker.
-    window.addEventListener('maximus-bridge-fetch', e => {
-        const detalle = e.detail;
-        if (!detalle?.requestId || !detalle?.url) return;
-
-        const eventoRespuesta = `maximus-bridge-res-${detalle.requestId}`;
-
+    const enviarFetchAlBackground = (detalle, responder) => {
         try {
             chrome.runtime.sendMessage(
                 {
@@ -28,26 +22,76 @@
                         ? { ok: false, error: chrome.runtime.lastError.message }
                         : (respuesta || { ok: false, error: 'Sin respuesta del background' });
 
-                    window.dispatchEvent(new CustomEvent(eventoRespuesta, { detail: payload }));
+                    responder(payload);
                 }
             );
         } catch (err) {
-            window.dispatchEvent(
-                new CustomEvent(eventoRespuesta, {
-                    detail: { ok: false, error: err?.message || 'Error al enviar petición' }
-                })
-            );
+            responder({ ok: false, error: err?.message || 'Error al enviar petición' });
         }
-    });
+    };
 
-    window.addEventListener('maximus-bridge-abort', e => {
-        const requestId = e.detail?.requestId;
+    const enviarAbortAlBackground = requestId => {
         if (!requestId) return;
         try {
             chrome.runtime.sendMessage({ action: 'MAXIMUS_ABORT', requestId });
         } catch {
             // Ignorar si la pestaña se está cerrando.
         }
+    };
+
+    // Puente por window.postMessage (canal seguro entre mundos en Chrome MV3) y respaldo por CustomEvent.
+    window.addEventListener('message', e => {
+        if (e.source !== window || !e.data || typeof e.data !== 'object') return;
+
+        if (e.data.__maximus === 'bridge-fetch') {
+            const detalle = e.data;
+            if (!detalle.requestId || !detalle.url) return;
+            enviarFetchAlBackground(detalle, payload => {
+                window.postMessage(
+                    {
+                        __maximus: 'bridge-res',
+                        requestId: detalle.requestId,
+                        payload
+                    },
+                    location.origin || '*'
+                );
+            });
+            return;
+        }
+
+        if (e.data.__maximus === 'bridge-abort') {
+            enviarAbortAlBackground(e.data.requestId);
+        }
+    });
+
+    // Reenvía peticiones binarias CORS desde el script actualizado al Service Worker.
+    window.addEventListener('maximus-bridge-fetch', e => {
+        let detalle = e.detail;
+        if (typeof detalle === 'string') {
+            try {
+                detalle = JSON.parse(detalle);
+            } catch {
+                return;
+            }
+        }
+        if (!detalle?.requestId || !detalle?.url) return;
+
+        const eventoRespuesta = `maximus-bridge-res-${detalle.requestId}`;
+        enviarFetchAlBackground(detalle, payload => {
+            window.dispatchEvent(new CustomEvent(eventoRespuesta, { detail: payload }));
+        });
+    });
+
+    window.addEventListener('maximus-bridge-abort', e => {
+        let detalle = e.detail;
+        if (typeof detalle === 'string') {
+            try {
+                detalle = JSON.parse(detalle);
+            } catch {
+                return;
+            }
+        }
+        enviarAbortAlBackground(detalle?.requestId);
     });
 
     const cargarModulosLocales = async () => {
@@ -82,7 +126,7 @@
 
         if (info.inyectadoRemoto) {
             // Damos un margen breve para que termine de ejecutarse el script registrado en USER_SCRIPT.
-            await new Promise(r => setTimeout(r, 300));
+            await new Promise(r => setTimeout(r, 600));
             if (document.documentElement?.dataset?.maximusIniciado !== '1') {
                 await cargarModulosLocales();
             }

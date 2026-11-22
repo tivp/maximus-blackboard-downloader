@@ -227,7 +227,7 @@ export async function asegurarElementoEnDom(r, uActiva, uLog, pcActivo) {
 }
 
 // Intenta sacar el recurso por API REST primero; si no alcanza, hace clic en el ítem del DOM y lee el visor que abre Blackboard.
-export async function capturarClic(r, uLog, uActiva = null, pcActivo = null) {
+export async function capturarClic(r, uLog, uActiva = null, pcActivo = null, saltarApi = false) {
     verificarCancelacion();
 
     const courseId = obtenerIdCursoActual();
@@ -236,14 +236,14 @@ export async function capturarClic(r, uLog, uActiva = null, pcActivo = null) {
         r.hrefOriginal?.match(/\/(?:document|scorm\/overview)\/(_\d+_\d+)/i)?.[1] ||
         '';
 
-    if (courseId && docId) {
+    if (!saltarApi && courseId && docId) {
         const viaApi = await extraerDocumentoViaApiBlackboard(courseId, docId, r.nombre);
         if (viaApi && viaApi.length > 0) {
             if (viaApi[0]?.omitidoInteractivo) {
                 return viaApi;
             }
             uLog?.log?.push(`[NINJA API] ${r.nombre} extraído sin cambiar de pantalla (${viaApi.length} elementos)`);
-            return viaApi;
+            return viaApi.map(item => ({ ...item, viaApi: true }));
         }
     }
 

@@ -60,15 +60,9 @@ export async function procesarRecursoItem(r, uLog, zip, carpetaBase, uActiva = n
     const esEnlaceExternoDirecto = !!(r.url && esUrlExterna(r.url));
 
     if (!resultado.archivos.length && !esEnlaceExternoDirecto) {
-        try {
-            const capturados = await capturarClic(r, uLog, uActiva, pcActivo);
-
-            if (visor().esFullDocument || enVistaDocumentoPantallaCompleta()) {
-                await cerrarVisor(uLog, uActiva, pcActivo);
-            }
-
+        const descargarCapturados = async capturados => {
             if (capturados.some(c => c?.omitidoInteractivo)) {
-                return { omitidoInteractivo: true, guardados: [], errores: [] };
+                return { omitidoInteractivo: true };
             }
 
             for (const itemCap of capturados) {
@@ -100,6 +94,42 @@ export async function procesarRecursoItem(r, uLog, zip, carpetaBase, uActiva = n
                         bytes: new TextEncoder().encode(itemCap.textoPlano),
                         subCarpeta: ''
                     });
+                }
+            }
+
+            return { omitidoInteractivo: false };
+        };
+
+        try {
+            const capturados = await capturarClic(r, uLog, uActiva, pcActivo, false);
+
+            if (visor().esFullDocument || enVistaDocumentoPantallaCompleta()) {
+                await cerrarVisor(uLog, uActiva, pcActivo);
+            }
+
+            const resCap = await descargarCapturados(capturados);
+            if (resCap.omitidoInteractivo) {
+                return { omitidoInteractivo: true, guardados: [], errores: [] };
+            }
+
+            if (!resultado.archivos.length && capturados.some(c => c?.viaApi)) {
+                const motivoApi = [...resultado.errores].filter(Boolean).join(' | ') || 'sin respuesta';
+                uLog.log.push(`[NINJA API] Descarga directa falló en "${r.nombre}" (${motivoApi}), reintentando vía visor DOM...`);
+                resultado.errores = [];
+
+                const capturadosDom = await capturarClic(r, uLog, uActiva, pcActivo, true);
+
+                if (visor().esFullDocument || enVistaDocumentoPantallaCompleta()) {
+                    await cerrarVisor(uLog, uActiva, pcActivo);
+                }
+
+                const resDom = await descargarCapturados(capturadosDom);
+                if (resDom.omitidoInteractivo) {
+                    return { omitidoInteractivo: true, guardados: [], errores: [] };
+                }
+
+                if (!resultado.archivos.length && !resultado.errores.length && motivoApi) {
+                    resultado.errores.push(motivoApi);
                 }
             }
 
