@@ -51,7 +51,10 @@ export const estado = {
     evaluacionesModulosSinEval: new Set(),
     evaluacionesCarpetasConEval: new Set(),
     evaluacionesCacheApi: new Map(),
-    evaluacionesBotonesAutoAbiertos: new WeakSet()
+    evaluacionesBotonesAutoAbiertos: new WeakSet(),
+    evaluacionesNotificacionCerrada: false,
+    evaluacionesAutomatizacionActiva: false,
+    evaluacionesTimerBackdrop: null
 };
 
 // Sincroniza el atributo en <html> para que page-hook.js sepa cuándo hay una descarga en curso.
@@ -60,6 +63,12 @@ export function marcarOcupado(valor) {
     if (document.documentElement) {
         if (estado.ocupado) {
             document.documentElement.dataset.maximusOcupado = '1';
+            estado.evaluacionesAutomatizacionActiva = false;
+            if (estado.evaluacionesTimerBackdrop) {
+                clearTimeout(estado.evaluacionesTimerBackdrop);
+                estado.evaluacionesTimerBackdrop = null;
+            }
+            document.querySelectorAll('.maximus-eval-backdrop, .maximus-eval-notif').forEach(el => el.remove());
         } else {
             delete document.documentElement.dataset.maximusOcupado;
         }

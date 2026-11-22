@@ -939,6 +939,20 @@ export function esElementoEvaluacionEnNodo(raiz, card = null) {
     if (
         [
             ...raiz.querySelectorAll(
+                '.ax-focusable-title, [data-analytics-id*="gradebook.item"], a[href*="/assessment/"], a[href*="/assignment/"]'
+            )
+        ].some(el => {
+            if (!esPropio(el)) return false;
+            const txt = tituloEl(el) || texto(el.getAttribute('aria-label') || '');
+            return Boolean(txt && RE.encuestaOSondeo.test(txt));
+        })
+    ) {
+        return false;
+    }
+
+    if (
+        [
+            ...raiz.querySelectorAll(
                 'a[href*="/assessment/"], a[href*="/assignment/"], button[href*="/assessment/"], [data-analytics-id*="gradebook.item"]'
             )
         ].some(esPropio)
@@ -1003,12 +1017,12 @@ export function esTarjetaEvaluacion(card) {
         return false;
     }
 
-    if (esElementoEvaluacionEnNodo(card, card)) {
-        return true;
-    }
-
     if (nombre && RE.encuestaOSondeo.test(nombre)) {
         return false;
+    }
+
+    if (esElementoEvaluacionEnNodo(card, card)) {
+        return true;
     }
 
     for (let p = card.parentElement?.closest(TARJETAS); p; p = p.parentElement?.closest(TARJETAS)) {
@@ -1029,6 +1043,12 @@ export function reiniciarEstadoEvaluacionesSiCambioCurso() {
         estado.evaluacionesCarpetasConEval.clear();
         estado.evaluacionesCacheApi.clear();
         estado.evaluacionesBotonesAutoAbiertos = new WeakSet();
+        estado.evaluacionesNotificacionCerrada = false;
+        estado.evaluacionesAutomatizacionActiva = false;
+        if (estado.evaluacionesTimerBackdrop) {
+            clearTimeout(estado.evaluacionesTimerBackdrop);
+            estado.evaluacionesTimerBackdrop = null;
+        }
     }
 }
 
@@ -1063,6 +1083,18 @@ export async function desplegarEvaluacionesAutomaticamente(alActualizar = null) 
         estado.ocupado ||
         !enVistaOutlineCurso() ||
         obtenerIdCursoActual() !== courseIdInicial;
+
+    let automatizacionMostrada = false;
+    const iniciarAutomatizacionVisual = () => {
+        if (automatizacionMostrada || debeAbortar()) return;
+        automatizacionMostrada = true;
+        if (estado.evaluacionesTimerBackdrop) {
+            clearTimeout(estado.evaluacionesTimerBackdrop);
+            estado.evaluacionesTimerBackdrop = null;
+        }
+        estado.evaluacionesAutomatizacionActiva = true;
+        alActualizar?.();
+    };
 
     const esperarHijosContenedor = async (card, btn, hijosAntes, ms = 2500) => {
         await esperarHasta(
@@ -1116,6 +1148,8 @@ export async function desplegarEvaluacionesAutomaticamente(alActualizar = null) 
             });
 
             if (!pendientes.length) break;
+
+            iniciarAutomatizacionVisual();
 
             let abrioAlguno = false;
             for (const btn of pendientes) {
@@ -1188,6 +1222,8 @@ export async function desplegarEvaluacionesAutomaticamente(alActualizar = null) 
         }
 
         if (candidatos.length) {
+            iniciarAutomatizacionVisual();
+
             const inspecciones = await Promise.all(
                 candidatos.map(async item => {
                     if (RE.carpetaEvaluacion.test(item.nombre) || RE.moduloFinal.test(item.nombre)) {
@@ -1261,6 +1297,24 @@ export async function desplegarEvaluacionesAutomaticamente(alActualizar = null) 
         const reintentar = estado.evaluacionesReintentar;
         estado.evaluacionesEnCurso = false;
         estado.evaluacionesReintentar = false;
+
+        if (estado.ocupado || !enVistaOutlineCurso()) {
+            if (estado.evaluacionesTimerBackdrop) {
+                clearTimeout(estado.evaluacionesTimerBackdrop);
+                estado.evaluacionesTimerBackdrop = null;
+            }
+            estado.evaluacionesAutomatizacionActiva = false;
+            alActualizar?.();
+        } else if (automatizacionMostrada && !reintentar && courseIdInicial === obtenerIdCursoActual()) {
+            estado.evaluacionesTimerBackdrop = setTimeout(() => {
+                estado.evaluacionesTimerBackdrop = null;
+                if (!estado.evaluacionesEnCurso) {
+                    estado.evaluacionesAutomatizacionActiva = false;
+                    alActualizar?.();
+                }
+            }, 450);
+        }
+
         if (reintentar && !estado.ocupado && enVistaOutlineCurso()) {
             setTimeout(() => {
                 desplegarEvaluacionesAutomaticamente(alActualizar);

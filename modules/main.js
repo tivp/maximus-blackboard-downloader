@@ -471,7 +471,7 @@ export function iniciar() {
         }
     }
 
-    document.querySelectorAll('.maximus-panel').forEach(p => p.remove());
+    document.querySelectorAll('.maximus-panel, .maximus-eval-backdrop, .maximus-eval-notif').forEach(p => p.remove());
     estado.unidades.clear();
     estado.panelCurso = null;
     estado.evaluacionesCursoId = '';
@@ -482,6 +482,12 @@ export function iniciar() {
     estado.evaluacionesCarpetasConEval.clear();
     estado.evaluacionesCacheApi.clear();
     estado.evaluacionesBotonesAutoAbiertos = new WeakSet();
+    estado.evaluacionesNotificacionCerrada = false;
+    estado.evaluacionesAutomatizacionActiva = false;
+    if (estado.evaluacionesTimerBackdrop) {
+        clearTimeout(estado.evaluacionesTimerBackdrop);
+        estado.evaluacionesTimerBackdrop = null;
+    }
     if (document.documentElement) {
         document.documentElement.dataset.maximusIniciado = '1';
     }
