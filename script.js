@@ -1747,6 +1747,40 @@
         }, 1800);
     }
 
+    function esEvaluacionCompletada(fila, card = null) {
+        const raiz = card || fila;
+        if (!raiz) return false;
+
+        const perteneceATarjeta = el => {
+            if (!card) return true;
+            const tarjetaCercana = el.closest(TARJETAS);
+            return !tarjetaCercana || tarjetaCercana === card;
+        };
+
+        const botonesEstado = raiz.querySelectorAll(
+            '.js-review-state-icon-button, button[role="checkbox"][data-analytics-id*="review-state"], button[role="checkbox"][aria-label*="Estado de"]'
+        );
+        for (const btn of botonesEstado) {
+            if (!perteneceATarjeta(btn)) continue;
+            const ariaChecked = (btn.getAttribute('aria-checked') || '').trim().toLowerCase();
+            if (ariaChecked === 'true') return true;
+            if (ariaChecked === 'false' || ariaChecked === 'mixed') return false;
+
+            const label = texto(btn.getAttribute('aria-label') || '');
+            if (/:\s*completad[oa]\b/i.test(label)) return true;
+            if (/:\s*(?:iniciad[oa]|sin\s+iniciar|no\s+iniciad[oa])\b/i.test(label)) return false;
+
+            if (btn.querySelector('svg[class*="completed"]')) return true;
+        }
+
+        const svgsCompletados = raiz.querySelectorAll('svg[class*="makeStylescompleted"], [role="checkbox"] svg[class*="completed"]');
+        for (const svg of svgsCompletados) {
+            if (perteneceATarjeta(svg)) return true;
+        }
+
+        return false;
+    }
+
     function actualizarNotificacionEvaluaciones(items = []) {
         if (ocupado || evaluacionesNotificacionCerrada || !enVistaOutlineCurso()) {
             document.querySelectorAll('.maximus-eval-backdrop, .maximus-eval-notif').forEach(el => el.remove());
@@ -1778,20 +1812,39 @@
         }
 
         let notif = document.querySelector('.maximus-eval-notif');
+        if (notif && !notif.querySelector('.maximus-eval-notif-lista-pendientes')) {
+            notif.remove();
+            notif = null;
+        }
         if (!notif) {
             notif = document.createElement('div');
             notif.className = 'maximus-eval-notif';
             notif.dataset.maximus = 'eval-notif';
             notif.setAttribute('role', 'region');
-            notif.setAttribute('aria-label', 'Evaluaciones pendientes');
+            notif.setAttribute('aria-label', 'Índice de evaluaciones');
 
             notif.innerHTML = `
                 <div class="maximus-eval-notif-cabecera">
-                    <div class="maximus-eval-notif-titulo">Tienes las siguientes evaluaciones pendientes:</div>
+                    <div class="maximus-eval-notif-titulo">Índice de evaluaciones</div>
                     <button class="maximus-eval-notif-cerrar" type="button" aria-label="Cerrar notificación" title="Cerrar">&times;</button>
                 </div>
                 <div class="maximus-eval-notif-estado" hidden>Buscando y desplegando evaluaciones...</div>
-                <ol class="maximus-eval-notif-lista"></ol>
+                <div class="maximus-eval-notif-seccion" data-maximus-seccion="pendientes">
+                    <div class="maximus-eval-notif-subtitulo">
+                        <span>Evaluaciones pendientes:</span>
+                        <span class="maximus-eval-notif-contador maximus-eval-notif-contador-pendientes">0</span>
+                    </div>
+                    <div class="maximus-eval-notif-vacio maximus-eval-notif-vacio-pendientes">Ninguna</div>
+                    <ol class="maximus-eval-notif-lista maximus-eval-notif-lista-pendientes"></ol>
+                </div>
+                <div class="maximus-eval-notif-seccion" data-maximus-seccion="completadas">
+                    <div class="maximus-eval-notif-subtitulo">
+                        <span>Evaluaciones completadas:</span>
+                        <span class="maximus-eval-notif-contador ok maximus-eval-notif-contador-completadas">0</span>
+                    </div>
+                    <div class="maximus-eval-notif-vacio maximus-eval-notif-vacio-completadas">Ninguna</div>
+                    <ol class="maximus-eval-notif-lista maximus-eval-notif-lista-completadas"></ol>
+                </div>
             `;
 
             for (const evento of ['pointerdown', 'mousedown', 'mouseup', 'click', 'keydown']) {
@@ -1819,43 +1872,68 @@
             estadoEl.hidden = !enAutomatizacion;
         }
 
-        const firma = `${enAutomatizacion ? 1 : 0}::${items.map(it => `${it.id}:${it.titulo}`).join('||')}`;
+        const firma = `${enAutomatizacion ? 1 : 0}::${items.map(it => `${it.id}:${it.completada ? 1 : 0}:${it.titulo}`).join('||')}`;
         if (notif.dataset.maximusFirma === firma) {
             return;
         }
         notif.dataset.maximusFirma = firma;
 
-        const lista = notif.querySelector('.maximus-eval-notif-lista');
-        if (!lista) return;
-        lista.innerHTML = '';
+        const pendientes = items.filter(it => !it.completada);
+        const completadas = items.filter(it => it.completada);
 
-        if (!items.length) {
-            lista.hidden = true;
-            return;
-        }
-        lista.hidden = false;
+        const renderizarSeccion = (tipo, listaSeccion, esCompletada) => {
+            const contador = notif.querySelector(`.maximus-eval-notif-contador-${tipo}`);
+            const vacio = notif.querySelector(`.maximus-eval-notif-vacio-${tipo}`);
+            const lista = notif.querySelector(`.maximus-eval-notif-lista-${tipo}`);
+            if (contador) contador.textContent = String(listaSeccion.length);
+            if (!lista) return;
 
-        items.forEach((item, idx) => {
-            const li = document.createElement('li');
-            li.className = 'maximus-eval-notif-item';
+            lista.innerHTML = '';
+            if (!listaSeccion.length) {
+                lista.hidden = true;
+                if (vacio) {
+                    vacio.textContent = enAutomatizacion ? 'Cargando...' : 'Ninguna';
+                    vacio.hidden = false;
+                }
+                return;
+            }
 
-            const num = document.createElement('span');
-            num.className = 'maximus-eval-notif-num';
-            num.textContent = `${idx + 1}.`;
+            lista.hidden = false;
+            if (vacio) vacio.hidden = true;
 
-            const enlace = document.createElement('a');
-            enlace.className = 'maximus-eval-notif-link';
-            enlace.setAttribute('href', `#${item.id}`);
-            enlace.textContent = item.titulo;
-            enlace.addEventListener('click', e => {
-                e.preventDefault();
-                e.stopPropagation();
-                irAEvaluacionHash(item.id);
+            listaSeccion.forEach((item, idx) => {
+                const li = document.createElement('li');
+                li.className = 'maximus-eval-notif-item';
+
+                const num = document.createElement('span');
+                num.className = 'maximus-eval-notif-num';
+                num.textContent = `${idx + 1}.`;
+
+                const enlace = document.createElement('a');
+                enlace.className = 'maximus-eval-notif-link';
+                enlace.setAttribute('href', `#${item.id}`);
+                enlace.textContent = item.titulo;
+                enlace.addEventListener('click', e => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    irAEvaluacionHash(item.id);
+                });
+
+                if (esCompletada) {
+                    const check = document.createElement('span');
+                    check.className = 'maximus-eval-notif-check';
+                    check.setAttribute('aria-hidden', 'true');
+                    check.textContent = '✓';
+                    li.append(num, check, enlace);
+                } else {
+                    li.append(num, enlace);
+                }
+                lista.append(li);
             });
+        };
 
-            li.append(num, enlace);
-            lista.append(li);
-        });
+        renderizarSeccion('pendientes', pendientes, false);
+        renderizarSeccion('completadas', completadas, true);
     }
 
     function marcarEvaluaciones() {
@@ -1907,12 +1985,13 @@
         const idsUsados = new Set();
         const items = registros.map(({ fila, card }, idx) => {
             const titulo = obtenerTituloEvaluacion(fila, card);
+            const completada = esEvaluacionCompletada(fila, card);
             const hashId = generarHashIdEvaluacion(titulo, idx, idsUsados);
             fila.dataset.maximusEvalId = hashId;
             if (!fila.id || fila.id.startsWith('maximus-eval-')) {
                 fila.id = hashId;
             }
-            return { id: hashId, titulo, fila, card };
+            return { id: hashId, titulo, completada, fila, card };
         });
 
         actualizarNotificacionEvaluaciones(items);
@@ -2915,6 +2994,62 @@
             .maximus-eval-notif-link:focus-visible {
                 text-decoration: underline !important;
                 color: #0550ae !important;
+            }
+
+            .maximus-eval-notif-seccion {
+                margin-top: 8px !important;
+                padding-top: 7px !important;
+                border-top: 1px dashed rgba(180, 134, 11, 0.35) !important;
+            }
+
+            .maximus-eval-notif-subtitulo {
+                display: flex !important;
+                align-items: center !important;
+                justify-content: space-between !important;
+                gap: 8px !important;
+                font-size: 12px !important;
+                font-weight: 700 !important;
+                color: #5c4000 !important;
+                margin: 0 0 4px 0 !important;
+            }
+
+            .maximus-eval-notif-contador {
+                display: inline-flex !important;
+                align-items: center !important;
+                justify-content: center !important;
+                min-width: 18px !important;
+                height: 18px !important;
+                padding: 0 6px !important;
+                border-radius: 999px !important;
+                background: rgba(180, 134, 11, 0.16) !important;
+                color: #5c4000 !important;
+                font-size: 11px !important;
+                font-weight: 700 !important;
+            }
+
+            .maximus-eval-notif-contador.ok {
+                background: rgba(26, 127, 55, 0.14) !important;
+                color: #116329 !important;
+            }
+
+            .maximus-eval-notif-vacio {
+                display: block !important;
+                font-size: 12px !important;
+                font-style: italic !important;
+                color: #7c5c0a !important;
+                padding: 2px 0 2px 4px !important;
+            }
+
+            .maximus-eval-notif-vacio[hidden],
+            .maximus-eval-notif-lista[hidden] {
+                display: none !important;
+            }
+
+            .maximus-eval-notif-check {
+                color: #1a7f37 !important;
+                font-weight: 700 !important;
+                font-size: 12px !important;
+                flex: 0 0 auto !important;
             }
 
             @media (max-width: 650px) {
