@@ -135,7 +135,7 @@ function peticionViaPuenteDom(url) {
 
         const limpiar = () => {
             clearTimeout(timer);
-            clearTimeout(timerAck);
+            if (timerAck) clearTimeout(timerAck);
             estado.abortadoresActivos.delete(abortar);
             window.removeEventListener('message', alMensaje);
             window.removeEventListener(eventoRespuesta, alEvento);
@@ -170,7 +170,7 @@ function peticionViaPuenteDom(url) {
             if (e.source !== window || !e.data) return;
             if (e.data.__maximus === 'bridge-ack' && e.data?.requestId === requestId) {
                 ackRecibido = true;
-                clearTimeout(timerAck);
+                if (timerAck) clearTimeout(timerAck);
                 return;
             }
             if (e.data.__maximus === 'bridge-res' && e.data?.requestId === requestId) {
@@ -203,12 +203,16 @@ function peticionViaPuenteDom(url) {
 
         estado.abortadoresActivos.add(abortar);
 
-        const timerAck = setTimeout(() => {
-            if (finalizado || ackRecibido) return;
-            finalizado = true;
-            limpiar();
-            reject(new Error('Puente DOM sin respuesta'));
-        }, 2000);
+        // Solo exigimos ACK rápido cuando el content.js cargado en la pestaña soporta bridge-ack (v2).
+        const soportaAck = document.documentElement?.dataset?.maximusBridgeV2 === '1';
+        const timerAck = soportaAck
+            ? setTimeout(() => {
+                  if (finalizado || ackRecibido) return;
+                  finalizado = true;
+                  limpiar();
+                  reject(new Error('Puente DOM sin respuesta'));
+              }, 2000)
+            : null;
 
         const timer = setTimeout(() => {
             if (finalizado) return;
@@ -346,9 +350,9 @@ async function fetchLocal(url) {
     estado.abortadoresActivos.add(abortar);
     const timeout = setTimeout(() => ctrl.abort(), CFG.TIMEOUT);
 
-    const realizarFetch = async credentials => {
+    try {
         const r = await fetch(url, {
-            credentials,
+            credentials: 'include',
             redirect: 'follow',
             signal: ctrl.signal
         });
@@ -372,19 +376,6 @@ async function fetchLocal(url) {
             headers: Object.fromEntries(r.headers.entries()),
             url: r.url || url
         };
-    };
-
-    try {
-        const esExterna = esUrlExterna(url);
-        const primero = esExterna ? 'omit' : 'include';
-        try {
-            return await realizarFetch(primero);
-        } catch (err) {
-            if (!esExterna || estado.cancelado || ctrl.signal.aborted) {
-                throw err;
-            }
-            return await realizarFetch('include');
-        }
     } catch (e) {
         if (estado.cancelado) {
             const err = new Error('Descarga detenida por el usuario');

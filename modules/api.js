@@ -200,26 +200,10 @@ export async function extraerDocumentoViaApiBlackboard(courseId, docId, nombreIt
             }
 
             const titulo = texto(itemObj.title || nombreItem);
-            let extUrl =
+            const extUrl =
                 itemObj.contentHandler?.url ||
-                itemObj.contentHandler?.launchUrl ||
-                itemObj.url ||
-                itemObj.launchUrl ||
                 itemObj.contentDetail?.['resource/x-bb-externallink']?.url ||
-                itemObj.links?.find(l => l.rel === 'alternate' && /^https?:/i.test(l.href || ''))?.href ||
-                '';
-
-            if (!extUrl && itemObj.contentDetail && typeof itemObj.contentDetail === 'object') {
-                for (const detalle of Object.values(itemObj.contentDetail)) {
-                    if (detalle && typeof detalle === 'object') {
-                        const cand = detalle.url || detalle.launchUrl;
-                        if (cand && /^https?:/i.test(String(cand))) {
-                            extUrl = cand;
-                            break;
-                        }
-                    }
-                }
-            }
+                itemObj.links?.find(l => l.rel === 'alternate' && /^https?:/i.test(l.href || ''))?.href;
 
             if (extUrl) {
                 agregarUrlDetectada(extUrl, titulo);
@@ -236,19 +220,6 @@ export async function extraerDocumentoViaApiBlackboard(courseId, docId, nombreIt
                     (fileObj.xid ? `/bbcswebdav/xid-${String(fileObj.xid).replace(/^xid-/i, '')}` : '') ||
                     itemObj.links?.find(l => /download|file|bbcswebdav/i.test(l.href || ''))?.href;
                 agregarUrlDetectada(fileUrl, titulo, fileObj.fileName || '');
-            }
-
-            if (Array.isArray(itemObj.attachments)) {
-                for (const att of itemObj.attachments) {
-                    const attUrl =
-                        att.permanentUrl ||
-                        att.viewUrl ||
-                        att.downloadUrl ||
-                        (att.xid ? `/bbcswebdav/xid-${String(att.xid).replace(/^xid-/i, '')}` : '');
-                    if (attUrl) {
-                        agregarUrlDetectada(attUrl, att.fileName || titulo, att.fileName || '');
-                    }
-                }
             }
         };
 
@@ -288,12 +259,11 @@ export async function extraerDocumentoViaApiBlackboard(courseId, docId, nombreIt
         };
 
         // Consultamos a la vez la API interna de Ultra y la pública v1 porque según el rol del alumno algunas propiedades solo vienen en una de las dos.
-        const [nodoInterno, nodoPublico, datosInternos, datosPublicos, adjuntosInternos, adjuntosPublicos] = await Promise.all([
+        const [nodoInterno, nodoPublico, datosInternos, datosPublicos, adjuntosPublicos] = await Promise.all([
             fetchJson(`/learn/api/v1/courses/${courseId}/contents/${docId}`),
             fetchJson(`/learn/api/public/v1/courses/${courseId}/contents/${docId}`),
             fetchJson(`/learn/api/v1/courses/${courseId}/contents/${docId}/children`),
             fetchJson(`/learn/api/public/v1/courses/${courseId}/contents/${docId}/children`),
-            fetchJson(`/learn/api/v1/courses/${courseId}/contents/${docId}/attachments`),
             fetchJson(`/learn/api/public/v1/courses/${courseId}/contents/${docId}/attachments`)
         ]);
 
@@ -305,7 +275,6 @@ export async function extraerDocumentoViaApiBlackboard(courseId, docId, nombreIt
         for (const nodo of [nodoInterno, nodoPublico]) {
             const cuerpoNodo =
                 nodo?.body?.rawText ||
-                (typeof nodo?.body === 'string' ? nodo.body : '') ||
                 nodo?.contentDetail?.['resource/x-bb-document']?.body?.rawText ||
                 '';
             if (typeof cuerpoNodo === 'string' && cuerpoNodo) {
@@ -320,39 +289,9 @@ export async function extraerDocumentoViaApiBlackboard(courseId, docId, nombreIt
             return [{ omitidoInteractivo: true }];
         }
 
-        const procesarAdjuntos = (listaInt, listaPub, contentIdObj) => {
-            const porId = new Map();
-            const sinId = [];
-            for (const att of [...(listaPub || []), ...(listaInt || [])]) {
-                if (!att) continue;
-                if (att.id) {
-                    const prev = porId.get(att.id) || {};
-                    porId.set(att.id, {
-                        ...prev,
-                        ...att,
-                        permanentUrl: att.permanentUrl || prev.permanentUrl,
-                        viewUrl: att.viewUrl || prev.viewUrl,
-                        downloadUrl: att.downloadUrl || prev.downloadUrl,
-                        xid: att.xid || prev.xid,
-                        fileName: att.fileName || prev.fileName
-                    });
-                } else {
-                    sinId.push(att);
-                }
-            }
-            return [...porId.values(), ...sinId].map(att => ({
-                att,
-                dlUrl:
-                    att.permanentUrl ||
-                    att.viewUrl ||
-                    att.downloadUrl ||
-                    (att.xid ? `/bbcswebdav/xid-${String(att.xid).replace(/^xid-/i, '')}` : '') ||
-                    (att.id ? `/learn/api/public/v1/courses/${courseId}/contents/${contentIdObj}/attachments/${att.id}/download` : '')
-            }));
-        };
-
-        for (const { att, dlUrl } of procesarAdjuntos(adjuntosInternos?.results, adjuntosPublicos?.results, docId)) {
-            if (dlUrl) {
+        if (adjuntosPublicos?.results?.length) {
+            for (const att of adjuntosPublicos.results) {
+                const dlUrl = `/learn/api/public/v1/courses/${courseId}/contents/${docId}/attachments/${att.id}/download`;
                 agregarUrlDetectada(dlUrl, att.fileName, att.fileName);
             }
         }
@@ -369,14 +308,12 @@ export async function extraerDocumentoViaApiBlackboard(courseId, docId, nombreIt
             extraerDeItemApi(hijo);
 
             if (hijo.id && /file|document|externallink/i.test(handler)) {
-                const subAttPub = await fetchJson(
+                const subAtt = await fetchJson(
                     `/learn/api/public/v1/courses/${courseId}/contents/${hijo.id}/attachments`
                 );
-                const subAttInt = !subAttPub?.results?.length
-                    ? await fetchJson(`/learn/api/v1/courses/${courseId}/contents/${hijo.id}/attachments`)
-                    : null;
-                for (const { att, dlUrl } of procesarAdjuntos(subAttInt?.results, subAttPub?.results, hijo.id)) {
-                    if (dlUrl) {
+                if (subAtt?.results?.length) {
+                    for (const att of subAtt.results) {
+                        const dlUrl = `/learn/api/public/v1/courses/${courseId}/contents/${hijo.id}/attachments/${att.id}/download`;
                         agregarUrlDetectada(dlUrl, tituloHijo || att.fileName, att.fileName);
                     }
                 }
