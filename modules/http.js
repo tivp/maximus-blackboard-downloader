@@ -129,11 +129,13 @@ function peticionViaPuenteDom(url) {
         }
 
         let finalizado = false;
+        let ackRecibido = false;
         const requestId = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
         const eventoRespuesta = `maximus-bridge-res-${requestId}`;
 
         const limpiar = () => {
             clearTimeout(timer);
+            clearTimeout(timerAck);
             estado.abortadoresActivos.delete(abortar);
             window.removeEventListener('message', alMensaje);
             window.removeEventListener(eventoRespuesta, alEvento);
@@ -141,6 +143,7 @@ function peticionViaPuenteDom(url) {
 
         const procesarPayload = respuesta => {
             if (finalizado) return;
+            ackRecibido = true;
             finalizado = true;
             limpiar();
 
@@ -164,10 +167,15 @@ function peticionViaPuenteDom(url) {
         };
 
         const alMensaje = e => {
-            if (e.source !== window || e.data?.__maximus !== 'bridge-res' || e.data?.requestId !== requestId) {
+            if (e.source !== window || !e.data) return;
+            if (e.data.__maximus === 'bridge-ack' && e.data?.requestId === requestId) {
+                ackRecibido = true;
+                clearTimeout(timerAck);
                 return;
             }
-            procesarPayload(e.data.payload);
+            if (e.data.__maximus === 'bridge-res' && e.data?.requestId === requestId) {
+                procesarPayload(e.data.payload);
+            }
         };
 
         const alEvento = e => {
@@ -187,6 +195,7 @@ function peticionViaPuenteDom(url) {
             finalizado = true;
             limpiar();
             window.postMessage({ __maximus: 'bridge-abort', requestId }, location.origin || '*');
+            window.dispatchEvent(new CustomEvent('maximus-bridge-abort', { detail: { requestId } }));
             const err = new Error('Descarga detenida por el usuario');
             err.esCancelacion = true;
             reject(err);
@@ -194,26 +203,33 @@ function peticionViaPuenteDom(url) {
 
         estado.abortadoresActivos.add(abortar);
 
+        const timerAck = setTimeout(() => {
+            if (finalizado || ackRecibido) return;
+            finalizado = true;
+            limpiar();
+            reject(new Error('Puente DOM sin respuesta'));
+        }, 2000);
+
         const timer = setTimeout(() => {
             if (finalizado) return;
             finalizado = true;
             limpiar();
             window.postMessage({ __maximus: 'bridge-abort', requestId }, location.origin || '*');
+            window.dispatchEvent(new CustomEvent('maximus-bridge-abort', { detail: { requestId } }));
             reject(new Error('Tiempo agotado'));
         }, CFG.TIMEOUT);
 
         window.addEventListener('message', alMensaje);
         window.addEventListener(eventoRespuesta, alEvento, { once: true });
-        window.postMessage(
-            {
-                __maximus: 'bridge-fetch',
-                requestId,
-                url,
-                timeout: CFG.TIMEOUT,
-                maxBytes: CFG.MAX_MB * 1048576
-            },
-            location.origin || '*'
-        );
+
+        const detalleEnvio = {
+            requestId,
+            url,
+            timeout: CFG.TIMEOUT,
+            maxBytes: CFG.MAX_MB * 1048576
+        };
+        window.postMessage({ __maximus: 'bridge-fetch', ...detalleEnvio }, location.origin || '*');
+        window.dispatchEvent(new CustomEvent('maximus-bridge-fetch', { detail: detalleEnvio }));
     });
 }
 
@@ -330,9 +346,9 @@ async function fetchLocal(url) {
     estado.abortadoresActivos.add(abortar);
     const timeout = setTimeout(() => ctrl.abort(), CFG.TIMEOUT);
 
-    try {
+    const realizarFetch = async credentials => {
         const r = await fetch(url, {
-            credentials: 'include',
+            credentials,
             redirect: 'follow',
             signal: ctrl.signal
         });
@@ -356,6 +372,19 @@ async function fetchLocal(url) {
             headers: Object.fromEntries(r.headers.entries()),
             url: r.url || url
         };
+    };
+
+    try {
+        const esExterna = esUrlExterna(url);
+        const primero = esExterna ? 'omit' : 'include';
+        try {
+            return await realizarFetch(primero);
+        } catch (err) {
+            if (!esExterna || estado.cancelado || ctrl.signal.aborted) {
+                throw err;
+            }
+            return await realizarFetch('include');
+        }
     } catch (e) {
         if (estado.cancelado) {
             const err = new Error('Descarga detenida por el usuario');

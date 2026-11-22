@@ -94,6 +94,14 @@ async function asegurarUserScriptDesdeCache() {
         return { activo: false, registradoAhora: false, cache: null };
     }
 
+    if (typeof chrome.userScripts.configureWorld === 'function') {
+        try {
+            await chrome.userScripts.configureWorld({ messaging: true });
+        } catch {
+            // Si el navegador no permite configurar messaging en el mundo aislado, se usa el puente DOM de content.js.
+        }
+    }
+
     try {
         const existentes = await chrome.userScripts.getScripts({ ids: [USER_SCRIPT_ID] });
         if (existentes && existentes.length > 0) {
@@ -208,6 +216,14 @@ async function actualizarScriptsDesdeGithub() {
         const pestanas = await chrome.tabs.query({ url: 'https://*/*' });
         for (const tab of pestanas) {
             if (await esPestanaObjetivoMaximus(tab)) {
+                try {
+                    await chrome.scripting.executeScript({
+                        target: { tabId: tab.id },
+                        files: ['content.js']
+                    });
+                } catch {
+                    // Si la pestaña bloquea scripting sobre content.js, seguimos con el bundle principal.
+                }
                 const ejecutado = await ejecutarCodigoEnPestana(tab.id, codigoCompilado);
                 if (ejecutado) pestanasActualizadas++;
             }
@@ -259,14 +275,29 @@ function manejarMensajeRed(mensaje, enviarRespuesta) {
 
         const reloj = setTimeout(() => ctrl.abort(), timeout);
 
-        fetch(url, {
-            method: 'GET',
-            credentials: 'include',
-            redirect: 'follow',
-            signal: ctrl.signal,
-            headers: { Accept: '*/*' }
-        })
+        const intentarFetch = credentials =>
+            fetch(url, {
+                method: 'GET',
+                credentials,
+                redirect: 'follow',
+                signal: ctrl.signal,
+                headers: { Accept: '*/*' }
+            });
+
+        intentarFetch('include')
+            .catch(err => {
+                if (ctrl.signal.aborted) throw err;
+                return intentarFetch('omit');
+            })
             .then(async r => {
+                if (!r.ok && r.status >= 400 && !ctrl.signal.aborted) {
+                    try {
+                        const r2 = await intentarFetch('omit');
+                        if (r2.ok) r = r2;
+                    } catch {
+                        // Mantener la respuesta original si también falla con omit.
+                    }
+                }
                 if (!r.ok) {
                     throw new Error(`HTTP ${r.status}`);
                 }

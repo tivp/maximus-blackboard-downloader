@@ -310,7 +310,7 @@
             childList: true,
             subtree: true,
             attributes: true,
-            attributeFilter: ['src']
+            attributeFilter: ['src', 'ng-src']
         });
     }
 
@@ -776,10 +776,26 @@
                 }
 
                 const titulo = texto(itemObj.title || nombreItem);
-                const extUrl =
+                let extUrl =
                     itemObj.contentHandler?.url ||
+                    itemObj.contentHandler?.launchUrl ||
+                    itemObj.url ||
+                    itemObj.launchUrl ||
                     itemObj.contentDetail?.['resource/x-bb-externallink']?.url ||
-                    itemObj.links?.find(l => l.rel === 'alternate' && /^https?:/i.test(l.href || ''))?.href;
+                    itemObj.links?.find(l => l.rel === 'alternate' && /^https?:/i.test(l.href || ''))?.href ||
+                    '';
+
+                if (!extUrl && itemObj.contentDetail && typeof itemObj.contentDetail === 'object') {
+                    for (const detalle of Object.values(itemObj.contentDetail)) {
+                        if (detalle && typeof detalle === 'object') {
+                            const cand = detalle.url || detalle.launchUrl;
+                            if (cand && /^https?:/i.test(String(cand))) {
+                                extUrl = cand;
+                                break;
+                            }
+                        }
+                    }
+                }
 
                 if (extUrl) {
                     agregarUrlDetectada(extUrl, titulo);
@@ -3812,9 +3828,9 @@
         abortadoresActivos.add(abortar);
         const timeout = setTimeout(() => ctrl.abort(), CFG.TIMEOUT);
 
-        try {
+        const realizarFetch = async credentials => {
             const r = await fetch(url, {
-                credentials: 'include',
+                credentials,
                 redirect: 'follow',
                 signal: ctrl.signal
             });
@@ -3838,6 +3854,19 @@
                 headers: Object.fromEntries(r.headers.entries()),
                 url: r.url || url
             };
+        };
+
+        try {
+            const esExterna = esUrlExterna(url);
+            const primero = esExterna ? 'omit' : 'include';
+            try {
+                return await realizarFetch(primero);
+            } catch (err) {
+                if (!esExterna || cancelado || ctrl.signal.aborted) {
+                    throw err;
+                }
+                return await realizarFetch('include');
+            }
         } catch (e) {
             if (cancelado) {
                 const err = new Error('Descarga detenida por el usuario');
@@ -4370,18 +4399,64 @@
     // VISOR LATERAL, PANTALLA UNITY/SCORM Y BOTÓN X DE LA ESQUINA
     // ==================================================
 
+    function decodificarTildeBlackboard(raw) {
+        if (!raw) return '';
+        const limpia = String(raw).split('#')[0].trim();
+        const normalizada = limpia.replace(/~([0-9A-Fa-f]{2})/g, '%$1');
+        try {
+            return decodeURIComponent(normalizada);
+        } catch {
+            return normalizada.replace(/%2F/gi, '/').replace(/%3A/gi, ':');
+        }
+    }
+
+    function extraerToolHrefDeLaunchFrame(panel = null) {
+        const candidatos = [];
+        if (location?.href) candidatos.push(location.href);
+
+        const raiz =
+            panel ||
+            document.querySelector('.bb-offcanvas-panel.active, .bb-offcanvas-panel') ||
+            document;
+
+        for (const el of raiz.querySelectorAll('[ng-href*="toolHref="], [href*="toolHref="], use')) {
+            for (const attr of ['ng-href', 'href', 'xlink:href']) {
+                const v = el.getAttribute(attr);
+                if (v && v.includes('toolHref=')) {
+                    candidatos.push(v);
+                }
+            }
+        }
+
+        for (const rawUrl of candidatos) {
+            try {
+                const m = String(rawUrl).match(/[?&]toolHref=([^&#]+)/i);
+                if (!m?.[1]) continue;
+                const dec = decodificarTildeBlackboard(m[1]);
+                const real = urlReal(dec);
+                if (real) return real;
+            } catch {
+                // Ignorar URL inválida
+            }
+        }
+
+        return '';
+    }
+
     function visor() {
         const docPanelPage = document.querySelector('document-panel');
         const scormPage = document.querySelector(
             'section.page-scorm-launch-frame, bb-scorm-launch-frame, learning-module-panel-view'
         );
+        const launchFrameEl = document.querySelector('url-launch-frame');
+        const urlLaunchVisible = Boolean(launchFrameEl && visible(launchFrameEl));
 
         const panel =
             (docPanelPage && visible(docPanelPage) ? docPanelPage : null) ||
             (scormPage && visible(scormPage) ? scormPage : null) ||
             document.querySelector('.bb-offcanvas-panel.active') ||
             document.querySelector('.ms-Panel.is-open, [class*="rootIsOpen_"]') ||
-            document.querySelector('url-launch-frame')?.closest('.bb-offcanvas-panel, .ms-Panel');
+            launchFrameEl?.closest('.bb-offcanvas-panel, .ms-Panel');
 
         const esInteractivoUnity = esVisorInteractivoUnity();
 
@@ -4399,10 +4474,13 @@
                 '#scorm-launch-iframe, url-launch-frame #url-launch-iframe, #url-launch-iframe'
             );
 
+        const toolHref = extraerToolHrefDeLaunchFrame(panel);
+
         const srcIframe =
             iframe?.dataset?.maximusSrc ||
             (iframe?.getAttribute('src') !== 'about:blank' ? iframe?.getAttribute('src') : '') ||
             iframe?.getAttribute('ng-src') ||
+            toolHref ||
             ultimaUrlIframeInterceptada ||
             '';
 
@@ -4440,6 +4518,8 @@
         const abierto =
             esInteractivoUnity ||
             enVistaDocumentoPantallaCompleta() ||
+            /\/launchFrame\b/i.test(location.pathname) ||
+            urlLaunchVisible ||
             (!!panel &&
                 visible(panel) &&
                 (esFullDocument ||
@@ -4463,11 +4543,15 @@
     }
 
     function buscarBotonCerrarVisor(v) {
-        // Prioridad máxima: la X de la esquina superior izquierda (course.content.header.exit / scorm.launchFrame.exit)
+        const esBotonBanner = b => b?.getAttribute('data-analytics-id') === 'course.launch.frame.close.button';
+
+        // Prioridad máxima: la X de la esquina superior izquierda (course.content.header.exit / scorm.launchFrame.exit) o la X de offcanvas (.bb-close)
         const candidatos = [
             document.querySelector('button[data-analytics-id="course.content.header.exit"]'),
             document.querySelector('button[data-analytics-id="course.content.scorm.launchFrame.exit"]'),
             document.querySelector('button[data-analytics-id="document.panel.exit"]'),
+            document.querySelector('button.bb-close[data-close="bb-offcanvas"]'),
+            document.querySelector('button[analytics-id="bb-close.courseCore.course.webLinkLaunchFrame.title"]'),
             document.querySelector('content-page-header button[aria-label="Salir"], content-page-header button[aria-label="Close"]'),
             document.querySelector('bb-readonly-panel-header button[aria-label="Salir"]'),
             ...(v.panel
@@ -4483,31 +4567,37 @@
                       'button[aria-label="Close"]'
                   )
                 : []),
-            document.querySelector('button.bb-close[data-close="bb-offcanvas"], button.ms-Panel-closeButton, button[class*="closeButton_"]'),
+            document.querySelector('button.ms-Panel-closeButton, button[class*="closeButton_"]'),
             document.querySelector('a[data-analytics-id="course.content.header.breadcrumbs.course.link"]')
-        ].filter(Boolean);
+        ].filter(b => b && !esBotonBanner(b));
 
         return candidatos.find(b => visible(b)) || candidatos[0] || null;
     }
 
     async function cerrarVisor(uLog, uActiva = null, pcActivo = null) {
         ultimoInteractivoDetectado = false;
+        ultimaUrlIframeInterceptada = '';
         const v = visor();
         if (!v.abierto && !enVistaDocumentoPantallaCompleta()) return true;
 
         const eraFullDocument = v.esFullDocument || enVistaDocumentoPantallaCompleta();
+        const teniaLaunchFrameUrl = /\/launchFrame\b/i.test(location.pathname);
 
-        // Si hay un iframe de SCORM/Unity activo, vaciarlo antes de pulsar la X para liberar memoria
-        const scormIframe = document.querySelector('iframe#scorm-launch-iframe, iframe[src*="scor-scormengine"], iframe[data-maximus-scorm="1"]');
-        if (scormIframe && scormIframe.getAttribute('src') !== 'about:blank') {
-            scormIframe.setAttribute('src', 'about:blank');
+        // Vaciamos iframes activos (SCORM y launchFrame) para soltar memoria y evitar leer data-maximus-src viejos
+        for (const ifr of document.querySelectorAll(
+            'iframe#scorm-launch-iframe, iframe#url-launch-iframe, iframe[src*="scor-scormengine"], iframe[data-maximus-scorm="1"], iframe[data-maximus-src]'
+        )) {
+            delete ifr.dataset.maximusSrc;
+            if (ifr.getAttribute('src') !== 'about:blank') {
+                ifr.setAttribute('src', 'about:blank');
+            }
         }
 
         const boton = buscarBotonCerrarVisor(v);
 
         if (boton) {
             boton.click();
-        } else if (eraFullDocument) {
+        } else if (eraFullDocument || teniaLaunchFrameUrl) {
             history.back();
         } else {
             uLog?.log?.push('[VISOR] No se encontró la X de la esquina / Salir');
@@ -4519,16 +4609,15 @@
                 ultimoInteractivoDetectado = false;
                 return !visor().abierto && !enVistaDocumentoPantallaCompleta();
             },
-            5000
+            1800
         );
 
         if (!cerrado) {
-            const linkOutline = document.querySelector(
-                'a[data-analytics-id="course.content.header.breadcrumbs.course.link"], a[href*="/outline"]'
-            );
-            if (linkOutline) {
-                linkOutline.click();
-            } else if (eraFullDocument) {
+            const overlay = document.querySelector('.bb-offcanvas-overlay');
+            if (overlay && visible(overlay)) {
+                overlay.click();
+            }
+            if (eraFullDocument || teniaLaunchFrameUrl || /\/launchFrame\b/i.test(location.pathname)) {
                 history.back();
             }
             cerrado = await esperarHasta(
@@ -4536,7 +4625,25 @@
                     ultimoInteractivoDetectado = false;
                     return !visor().abierto && !enVistaDocumentoPantallaCompleta();
                 },
-                5500
+                1800
+            );
+        }
+
+        if (!cerrado) {
+            const linkOutline = document.querySelector(
+                'a[data-analytics-id="course.content.header.breadcrumbs.course.link"], a[data-analytics-id="course.l1.outline.link"]'
+            );
+            if (linkOutline) {
+                linkOutline.click();
+            } else if (eraFullDocument || /\/launchFrame\b/i.test(location.pathname)) {
+                history.back();
+            }
+            cerrado = await esperarHasta(
+                () => {
+                    ultimoInteractivoDetectado = false;
+                    return !visor().abierto && !enVistaDocumentoPantallaCompleta();
+                },
+                3500
             );
         }
 
@@ -4549,7 +4656,7 @@
         return cerrado;
     }
 
-    async function capturarClic(r, uLog, uActiva = null, pcActivo = null) {
+    async function capturarClic(r, uLog, uActiva = null, pcActivo = null, saltarApi = false) {
         verificarCancelacion();
 
         // PASO NINJA 1: Intentar resolver vía API de Blackboard SIN tocar el DOM
@@ -4559,14 +4666,14 @@
             r.hrefOriginal?.match(/\/(?:document|scorm\/overview)\/(_\d+_\d+)/i)?.[1] ||
             '';
 
-        if (courseId && docId) {
+        if (!saltarApi && courseId && docId) {
             const viaApi = await extraerDocumentoViaApiBlackboard(courseId, docId, r.nombre);
             if (viaApi && viaApi.length > 0) {
                 if (viaApi[0]?.omitidoInteractivo) {
                     return viaApi;
                 }
                 uLog?.log?.push(`[NINJA API] ${r.nombre} extraído sin cambiar de pantalla (${viaApi.length} elementos)`);
-                return viaApi;
+                return viaApi.map(item => ({ ...item, viaApi: true }));
             }
         }
 
@@ -4647,7 +4754,11 @@
         }
 
         if (!valido && ultimaUrlIframeInterceptada) {
-            return [{ url: ultimaUrlIframeInterceptada, nombre: r.nombre }];
+            const urlCapturada = ultimaUrlIframeInterceptada;
+            if (visor().abierto || enVistaDocumentoPantallaCompleta()) {
+                await cerrarVisor(uLog, uActiva, pcActivo);
+            }
+            return [{ url: urlCapturada, nombre: r.nombre }];
         }
 
         if (!valido) {
@@ -4655,7 +4766,9 @@
         }
 
         if (ultimaUrlIframeInterceptada && !visor().abierto && !enVistaDocumentoPantallaCompleta()) {
-            return [{ url: ultimaUrlIframeInterceptada, nombre: r.nombre }];
+            const urlCapturada = ultimaUrlIframeInterceptada;
+            ultimaUrlIframeInterceptada = '';
+            return [{ url: urlCapturada, nombre: r.nombre }];
         }
 
         if (visor().esFullDocument || enVistaDocumentoPantallaCompleta() || r.esDocUltra) {
@@ -4695,12 +4808,25 @@
             return [{ omitidoInteractivo: true }];
         }
 
+        if (document.querySelector('url-launch-frame') && !visor().srcIframe && !ultimaUrlIframeInterceptada) {
+            const btnNuevaVentana = document.querySelector(
+                'button[data-analytics-id="courseCore.course.webLinkLaunchFrame.openInNewWindow"]'
+            );
+            if (btnNuevaVentana) {
+                btnNuevaVentana.click();
+                await esperarHasta(() => !!ultimaUrlIframeInterceptada, 1200);
+            }
+        }
+
+        verificarCancelacion();
+
         const v = visor();
+        let resultadoCaptura = null;
 
         // 1. Bloques de archivo (Video + PDFs en Información de la Asignatura)
         const bloquesExtraidos = extraerBloquesDeDocumentPanel(v.panel || document);
         if (bloquesExtraidos.length) {
-            return bloquesExtraidos.map(b => ({
+            resultadoCaptura = bloquesExtraidos.map(b => ({
                 url: b.url,
                 nombre: b.nombreArchivoSugerido || b.nombre,
                 subCarpeta: b.nombre
@@ -4708,7 +4834,7 @@
         }
 
         // 2. Enlaces directos en el panel
-        if (v.enlacesDescarga?.length) {
+        if (!resultadoCaptura && v.enlacesDescarga?.length) {
             const items = v.enlacesDescarga
                 .map(el => ({
                     url: urlReal(
@@ -4724,66 +4850,81 @@
                 }))
                 .filter(x => x.url);
 
-            if (items.length) return items;
+            if (items.length) resultadoCaptura = items;
         }
 
-        const directo =
-            v.enlaceDescargaPanel?.getAttribute('data-ally-file-preview-url') ||
-            v.enlaceDescargaPanel?.getAttribute('href') ||
-            v.enlaceDescargaPanel?.getAttribute('data-download-url') ||
-            v.mediaPanel?.getAttribute('src');
+        if (!resultadoCaptura) {
+            const directo =
+                v.enlaceDescargaPanel?.getAttribute('data-ally-file-preview-url') ||
+                v.enlaceDescargaPanel?.getAttribute('href') ||
+                v.enlaceDescargaPanel?.getAttribute('data-download-url') ||
+                v.mediaPanel?.getAttribute('src');
 
-        if (directo && urlReal(directo)) {
-            return [{ url: urlReal(directo), nombre: r.nombre }];
-        }
-
-        const urlIframe = urlReal(v.srcIframe);
-        if (urlIframe) {
-            return [{ url: urlIframe, nombre: r.nombre }];
-        }
-
-        try {
-            const docIframe = v.iframe?.contentDocument;
-            if (docIframe) {
-                if (docIframe.querySelector('#unity-container, #unity-canvas, canvas[id*="unity" i]')) {
-                    uLog?.log?.push(`[UNITY/SCORM] Canvas Unity detectado en "${r.nombre}" -> Presionando la X`);
-                    await cerrarVisor(uLog, uActiva, pcActivo);
-                    return [{ omitidoInteractivo: true }];
-                }
-
-                const internos = [
-                    ...docIframe.querySelectorAll(
-                        'a[download], a[href*="bbcswebdav"], audio[src], video[src], source[src], embed[src]'
-                    )
-                ]
-                    .map(el => ({
-                        url: urlReal(el.getAttribute('href') || el.getAttribute('src'), location.href),
-                        nombre: r.nombre
-                    }))
-                    .filter(x => x.url);
-
-                if (internos.length) {
-                    return internos;
-                }
+            if (directo && urlReal(directo)) {
+                resultadoCaptura = [{ url: urlReal(directo), nombre: r.nombre }];
             }
-        } catch {
-            // Iframe cross-origin
+        }
+
+        if (!resultadoCaptura) {
+            const urlIframe = urlReal(v.srcIframe);
+            if (urlIframe) {
+                resultadoCaptura = [{ url: urlIframe, nombre: r.nombre }];
+            }
+        }
+
+        if (!resultadoCaptura) {
+            try {
+                const docIframe = v.iframe?.contentDocument;
+                if (docIframe) {
+                    if (docIframe.querySelector('#unity-container, #unity-canvas, canvas[id*="unity" i]')) {
+                        uLog?.log?.push(`[UNITY/SCORM] Canvas Unity detectado en "${r.nombre}" -> Presionando la X`);
+                        await cerrarVisor(uLog, uActiva, pcActivo);
+                        return [{ omitidoInteractivo: true }];
+                    }
+
+                    const internos = [
+                        ...docIframe.querySelectorAll(
+                            'a[download], a[href*="bbcswebdav"], audio[src], video[src], source[src], embed[src]'
+                        )
+                    ]
+                        .map(el => ({
+                            url: urlReal(el.getAttribute('href') || el.getAttribute('src'), location.href),
+                            nombre: r.nombre
+                        }))
+                        .filter(x => x.url);
+
+                    if (internos.length) {
+                        resultadoCaptura = internos;
+                    }
+                }
+            } catch {
+                // Iframe cross-origin
+            }
         }
 
         // 3. Documento de texto sin adjuntos (ej. Resumen de la asignatura)
-        const contenedorTexto = v.panel || document.querySelector('document-panel');
-        if (contenedorTexto) {
-            const parrafos = [...contenedorTexto.querySelectorAll('.ql-editor, .bbml-editor')]
-                .map(ed => (ed.innerText || ed.textContent || '').trim())
-                .filter(Boolean)
-                .join('\r\n\r\n');
+        if (!resultadoCaptura) {
+            const contenedorTexto = v.panel || document.querySelector('document-panel');
+            if (contenedorTexto) {
+                const parrafos = [...contenedorTexto.querySelectorAll('.ql-editor, .bbml-editor')]
+                    .map(ed => (ed.innerText || ed.textContent || '').trim())
+                    .filter(Boolean)
+                    .join('\r\n\r\n');
 
-            const contenidoTxt =
-                parrafos ||
-                texto(v.cuerpoDocumento?.innerText || v.cuerpoDocumento?.textContent || '');
-            if (contenidoTxt && contenidoTxt.length > 5) {
-                return [{ textoPlano: contenidoTxt }];
+                const contenidoTxt =
+                    parrafos ||
+                    texto(v.cuerpoDocumento?.innerText || v.cuerpoDocumento?.textContent || '');
+                if (contenidoTxt && contenidoTxt.length > 5) {
+                    resultadoCaptura = [{ textoPlano: contenidoTxt }];
+                }
             }
+        }
+
+        if (resultadoCaptura) {
+            if (visor().abierto || enVistaDocumentoPantallaCompleta()) {
+                await cerrarVisor(uLog, uActiva, pcActivo);
+            }
+            return resultadoCaptura;
         }
 
         throw new Error('El visor no tiene archivo descargable');
@@ -4864,15 +5005,9 @@
         const esEnlaceExternoDirecto = !!(r.url && esUrlExterna(r.url));
 
         if (!resultado.archivos.length && !esEnlaceExternoDirecto) {
-            try {
-                const capturados = await capturarClic(r, uLog, uActiva, pcActivo);
-
-                if (visor().esFullDocument || enVistaDocumentoPantallaCompleta()) {
-                    await cerrarVisor(uLog, uActiva, pcActivo);
-                }
-
+            const descargarCapturados = async capturados => {
                 if (capturados.some(c => c?.omitidoInteractivo)) {
-                    return { omitidoInteractivo: true, guardados: [], errores: [] };
+                    return { omitidoInteractivo: true };
                 }
 
                 for (const itemCap of capturados) {
@@ -4904,6 +5039,45 @@
                             bytes: new TextEncoder().encode(itemCap.textoPlano),
                             subCarpeta: ''
                         });
+                    }
+                }
+
+                return { omitidoInteractivo: false };
+            };
+
+            try {
+                const capturados = await capturarClic(r, uLog, uActiva, pcActivo, false);
+
+                if (visor().abierto || visor().esFullDocument || enVistaDocumentoPantallaCompleta()) {
+                    await cerrarVisor(uLog, uActiva, pcActivo);
+                }
+
+                const resCap = await descargarCapturados(capturados);
+                if (resCap.omitidoInteractivo) {
+                    return { omitidoInteractivo: true, guardados: [], errores: [] };
+                }
+
+                const soloExternosApi =
+                    capturados.length > 0 && capturados.every(c => c?.url && esUrlExterna(c.url));
+
+                if (!resultado.archivos.length && capturados.some(c => c?.viaApi) && !soloExternosApi) {
+                    const motivoApi = [...resultado.errores].filter(Boolean).join(' | ') || 'sin respuesta';
+                    uLog.log.push(`[NINJA API] Descarga directa falló en "${r.nombre}" (${motivoApi}), reintentando vía visor DOM...`);
+                    resultado.errores = [];
+
+                    const capturadosDom = await capturarClic(r, uLog, uActiva, pcActivo, true);
+
+                    if (visor().abierto || visor().esFullDocument || enVistaDocumentoPantallaCompleta()) {
+                        await cerrarVisor(uLog, uActiva, pcActivo);
+                    }
+
+                    const resDom = await descargarCapturados(capturadosDom);
+                    if (resDom.omitidoInteractivo) {
+                        return { omitidoInteractivo: true, guardados: [], errores: [] };
+                    }
+
+                    if (!resultado.archivos.length && !resultado.errores.length && motivoApi) {
+                        resultado.errores.push(motivoApi);
                     }
                 }
 

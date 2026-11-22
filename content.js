@@ -5,94 +5,123 @@
 
     if (document.documentElement) {
         document.documentElement.dataset.maximusBridge = '1';
+        document.documentElement.dataset.maximusBridgeV2 = '1';
     }
 
-    const enviarFetchAlBackground = (detalle, responder) => {
-        try {
-            chrome.runtime.sendMessage(
-                {
-                    action: 'MAXIMUS_FETCH',
-                    requestId: detalle.requestId,
-                    url: detalle.url,
-                    timeout: detalle.timeout,
-                    maxBytes: detalle.maxBytes
-                },
-                respuesta => {
-                    const payload = chrome.runtime.lastError
-                        ? { ok: false, error: chrome.runtime.lastError.message }
-                        : (respuesta || { ok: false, error: 'Sin respuesta del background' });
+    if (!window.__maximusBridgeListo) {
+        window.__maximusBridgeListo = true;
 
-                    responder(payload);
-                }
-            );
-        } catch (err) {
-            responder({ ok: false, error: err?.message || 'Error al enviar petición' });
-        }
-    };
+        const solicitudesEnCurso = new Set();
 
-    const enviarAbortAlBackground = requestId => {
-        if (!requestId) return;
-        try {
-            chrome.runtime.sendMessage({ action: 'MAXIMUS_ABORT', requestId });
-        } catch {
-            // Ignorar si la pestaña se está cerrando.
-        }
-    };
-
-    // Puente por window.postMessage (canal seguro entre mundos en Chrome MV3) y respaldo por CustomEvent.
-    window.addEventListener('message', e => {
-        if (e.source !== window || !e.data || typeof e.data !== 'object') return;
-
-        if (e.data.__maximus === 'bridge-fetch') {
-            const detalle = e.data;
-            if (!detalle.requestId || !detalle.url) return;
-            enviarFetchAlBackground(detalle, payload => {
-                window.postMessage(
+        const enviarFetchAlBackground = (detalle, responder) => {
+            try {
+                chrome.runtime.sendMessage(
                     {
-                        __maximus: 'bridge-res',
+                        action: 'MAXIMUS_FETCH',
                         requestId: detalle.requestId,
-                        payload
+                        url: detalle.url,
+                        timeout: detalle.timeout,
+                        maxBytes: detalle.maxBytes
                     },
-                    location.origin || '*'
+                    respuesta => {
+                        const payload = chrome.runtime.lastError
+                            ? { ok: false, error: chrome.runtime.lastError.message }
+                            : (respuesta || { ok: false, error: 'Sin respuesta del background' });
+
+                        responder(payload);
+                    }
                 );
+            } catch (err) {
+                responder({ ok: false, error: err?.message || 'Error al enviar petición' });
+            }
+        };
+
+        const enviarAbortAlBackground = requestId => {
+            if (!requestId) return;
+            try {
+                chrome.runtime.sendMessage({ action: 'MAXIMUS_ABORT', requestId });
+            } catch {
+                // Ignorar si la pestaña se está cerrando.
+            }
+        };
+
+        const iniciarBridgeFetch = (detalle, responder) => {
+            if (!detalle?.requestId || !detalle?.url) return;
+            if (solicitudesEnCurso.has(detalle.requestId)) return;
+            solicitudesEnCurso.add(detalle.requestId);
+
+            window.postMessage(
+                {
+                    __maximus: 'bridge-ack',
+                    requestId: detalle.requestId
+                },
+                location.origin || '*'
+            );
+
+            enviarFetchAlBackground(detalle, payload => {
+                solicitudesEnCurso.delete(detalle.requestId);
+                responder(payload);
             });
-            return;
-        }
+        };
 
-        if (e.data.__maximus === 'bridge-abort') {
-            enviarAbortAlBackground(e.data.requestId);
-        }
-    });
+        // Puente por window.postMessage (canal seguro entre mundos en Chrome MV3) y respaldo por CustomEvent.
+        window.addEventListener('message', e => {
+            if (e.source !== window || !e.data || typeof e.data !== 'object') return;
 
-    // Reenvía peticiones binarias CORS desde el script actualizado al Service Worker.
-    window.addEventListener('maximus-bridge-fetch', e => {
-        let detalle = e.detail;
-        if (typeof detalle === 'string') {
-            try {
-                detalle = JSON.parse(detalle);
-            } catch {
+            if (e.data.__maximus === 'bridge-fetch') {
+                const detalle = e.data;
+                iniciarBridgeFetch(detalle, payload => {
+                    window.postMessage(
+                        {
+                            __maximus: 'bridge-res',
+                            requestId: detalle.requestId,
+                            payload
+                        },
+                        location.origin || '*'
+                    );
+                });
                 return;
             }
-        }
-        if (!detalle?.requestId || !detalle?.url) return;
 
-        const eventoRespuesta = `maximus-bridge-res-${detalle.requestId}`;
-        enviarFetchAlBackground(detalle, payload => {
-            window.dispatchEvent(new CustomEvent(eventoRespuesta, { detail: payload }));
+            if (e.data.__maximus === 'bridge-abort') {
+                solicitudesEnCurso.delete(e.data.requestId);
+                enviarAbortAlBackground(e.data.requestId);
+            }
         });
-    });
 
-    window.addEventListener('maximus-bridge-abort', e => {
-        let detalle = e.detail;
-        if (typeof detalle === 'string') {
-            try {
-                detalle = JSON.parse(detalle);
-            } catch {
-                return;
+        // Reenvía peticiones binarias CORS desde el script actualizado al Service Worker.
+        window.addEventListener('maximus-bridge-fetch', e => {
+            let detalle = e.detail;
+            if (typeof detalle === 'string') {
+                try {
+                    detalle = JSON.parse(detalle);
+                } catch {
+                    return;
+                }
             }
-        }
-        enviarAbortAlBackground(detalle?.requestId);
-    });
+            if (!detalle?.requestId || !detalle?.url) return;
+
+            const eventoRespuesta = `maximus-bridge-res-${detalle.requestId}`;
+            iniciarBridgeFetch(detalle, payload => {
+                window.dispatchEvent(new CustomEvent(eventoRespuesta, { detail: payload }));
+            });
+        });
+
+        window.addEventListener('maximus-bridge-abort', e => {
+            let detalle = e.detail;
+            if (typeof detalle === 'string') {
+                try {
+                    detalle = JSON.parse(detalle);
+                } catch {
+                    return;
+                }
+            }
+            if (detalle?.requestId) {
+                solicitudesEnCurso.delete(detalle.requestId);
+                enviarAbortAlBackground(detalle.requestId);
+            }
+        });
+    }
 
     const cargarModulosLocales = async () => {
         if (document.documentElement?.dataset?.maximusIniciado === '1') {

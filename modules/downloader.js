@@ -103,7 +103,7 @@ export async function procesarRecursoItem(r, uLog, zip, carpetaBase, uActiva = n
         try {
             const capturados = await capturarClic(r, uLog, uActiva, pcActivo, false);
 
-            if (visor().esFullDocument || enVistaDocumentoPantallaCompleta()) {
+            if (visor().abierto || visor().esFullDocument || enVistaDocumentoPantallaCompleta()) {
                 await cerrarVisor(uLog, uActiva, pcActivo);
             }
 
@@ -112,14 +112,17 @@ export async function procesarRecursoItem(r, uLog, zip, carpetaBase, uActiva = n
                 return { omitidoInteractivo: true, guardados: [], errores: [] };
             }
 
-            if (!resultado.archivos.length && capturados.some(c => c?.viaApi)) {
+            const soloExternosApi =
+                capturados.length > 0 && capturados.every(c => c?.url && esUrlExterna(c.url));
+
+            if (!resultado.archivos.length && capturados.some(c => c?.viaApi) && !soloExternosApi) {
                 const motivoApi = [...resultado.errores].filter(Boolean).join(' | ') || 'sin respuesta';
                 uLog.log.push(`[NINJA API] Descarga directa falló en "${r.nombre}" (${motivoApi}), reintentando vía visor DOM...`);
                 resultado.errores = [];
 
                 const capturadosDom = await capturarClic(r, uLog, uActiva, pcActivo, true);
 
-                if (visor().esFullDocument || enVistaDocumentoPantallaCompleta()) {
+                if (visor().abierto || visor().esFullDocument || enVistaDocumentoPantallaCompleta()) {
                     await cerrarVisor(uLog, uActiva, pcActivo);
                 }
 

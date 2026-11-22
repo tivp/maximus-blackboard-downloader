@@ -200,10 +200,26 @@ export async function extraerDocumentoViaApiBlackboard(courseId, docId, nombreIt
             }
 
             const titulo = texto(itemObj.title || nombreItem);
-            const extUrl =
+            let extUrl =
                 itemObj.contentHandler?.url ||
+                itemObj.contentHandler?.launchUrl ||
+                itemObj.url ||
+                itemObj.launchUrl ||
                 itemObj.contentDetail?.['resource/x-bb-externallink']?.url ||
-                itemObj.links?.find(l => l.rel === 'alternate' && /^https?:/i.test(l.href || ''))?.href;
+                itemObj.links?.find(l => l.rel === 'alternate' && /^https?:/i.test(l.href || ''))?.href ||
+                '';
+
+            if (!extUrl && itemObj.contentDetail && typeof itemObj.contentDetail === 'object') {
+                for (const detalle of Object.values(itemObj.contentDetail)) {
+                    if (detalle && typeof detalle === 'object') {
+                        const cand = detalle.url || detalle.launchUrl;
+                        if (cand && /^https?:/i.test(String(cand))) {
+                            extUrl = cand;
+                            break;
+                        }
+                    }
+                }
+            }
 
             if (extUrl) {
                 agregarUrlDetectada(extUrl, titulo);
