@@ -54,6 +54,7 @@ export const estado = {
     evaluacionesBotonesAutoAbiertos: new WeakSet(),
     evaluacionesNotificacionCerrada: false,
     evaluacionesAutomatizacionActiva: false,
+    evaluacionesAnalisisCompleto: false,
     evaluacionesTimerBackdrop: null,
     evaluacionesNotifPos: null,
     evaluacionesNotifMinimizada: false

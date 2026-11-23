@@ -255,9 +255,9 @@ export function descubrir() {
     }
 
     restaurarColoresFilas();
-    marcarEvaluaciones();
 
     if (estado.ocupado) {
+        marcarEvaluaciones();
         return;
     }
 
@@ -306,6 +306,7 @@ export function descubrir() {
 
     sincronizarBotonCurso();
     desplegarEvaluacionesAutomaticamente(marcarEvaluaciones);
+    marcarEvaluaciones();
 }
 
 export async function rehidratarDomCurso(uActiva = null, pcActivo = null) {
@@ -446,7 +447,26 @@ export function registrarControlColapsoEvaluaciones() {
     document.addEventListener('click', manejarClick, true);
 }
 
-export function agendar() {
+function mutacionesSoloMaximus(mutaciones) {
+    if (!Array.isArray(mutaciones) || !mutaciones.length) return false;
+    const esNodoMaximus = nodo =>
+        Boolean(nodo?.nodeType === 1 && (nodo.matches?.('[data-maximus]') || nodo.closest?.('[data-maximus]')));
+    return mutaciones.every(m => {
+        if (
+            m?.target?.closest?.('[data-maximus]') ||
+            m?.target?.parentElement?.closest?.('[data-maximus]')
+        ) {
+            return true;
+        }
+        const cambiados = [...(m?.addedNodes || []), ...(m?.removedNodes || [])];
+        return cambiados.length > 0 && cambiados.every(esNodoMaximus);
+    });
+}
+
+export function agendar(mutaciones = null) {
+    if (mutacionesSoloMaximus(mutaciones)) {
+        return;
+    }
     if (enVistaDocumentoPantallaCompleta()) {
         limpiarPanelesEnVistaDocumento();
         return;
@@ -484,6 +504,7 @@ export function iniciar() {
     estado.evaluacionesBotonesAutoAbiertos = new WeakSet();
     estado.evaluacionesNotificacionCerrada = false;
     estado.evaluacionesAutomatizacionActiva = false;
+    estado.evaluacionesAnalisisCompleto = false;
     estado.evaluacionesNotifPos = null;
     estado.evaluacionesNotifMinimizada = false;
     if (estado.evaluacionesTimerBackdrop) {

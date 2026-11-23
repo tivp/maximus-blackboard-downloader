@@ -76,6 +76,7 @@
     let evaluacionesBotonesAutoAbiertos = new WeakSet();
     let evaluacionesNotificacionCerrada = false;
     let evaluacionesAutomatizacionActiva = false;
+    let evaluacionesAnalisisCompleto = false;
     let evaluacionesTimerBackdrop = null;
     let evaluacionesNotifPos = null;
     let evaluacionesNotifMinimizada = false;
@@ -1290,10 +1291,13 @@
         ];
 
         for (const endpoint of endpoints) {
+            const controlador = typeof AbortController !== 'undefined' ? new AbortController() : null;
+            const timer = controlador ? setTimeout(() => controlador.abort(), 8000) : null;
             try {
                 const r = await fetch(endpoint, {
                     credentials: 'include',
-                    headers: { Accept: 'application/json' }
+                    headers: { Accept: 'application/json' },
+                    ...(controlador ? { signal: controlador.signal } : {})
                 });
                 if (!r.ok) continue;
                 const data = await r.json();
@@ -1303,6 +1307,8 @@
                 }
             } catch {
                 // Probar siguiente endpoint
+            } finally {
+                if (timer) clearTimeout(timer);
             }
         }
 
@@ -1672,13 +1678,19 @@
             clearTimeout(evaluacionesTimerBackdrop);
             evaluacionesTimerBackdrop = null;
         }
-        evaluacionesAutomatizacionActiva = false;
 
         const notif = document.querySelector('.maximus-eval-notif');
+        const estabaEnAutomatizacion = Boolean(
+            evaluacionesAutomatizacionActiva ||
+            notif?.classList.contains('en-automatizacion')
+        );
+        evaluacionesAutomatizacionActiva = false;
+
         if (notif) {
             notif.classList.remove('en-automatizacion');
-            const estadoEl = notif.querySelector('.maximus-eval-notif-estado');
-            if (estadoEl) estadoEl.hidden = true;
+        }
+        if (estabaEnAutomatizacion) {
+            marcarEvaluaciones();
         }
 
         try {
@@ -2014,7 +2026,7 @@
         document.querySelectorAll('.maximus-eval-backdrop').forEach(el => el.remove());
 
         let notif = document.querySelector('.maximus-eval-notif');
-        if (notif && !notif.querySelector('.maximus-eval-notif-cuerpo')) {
+        if (notif && (!notif.querySelector('.maximus-eval-notif-cuerpo') || notif.querySelector('.maximus-eval-notif-estado'))) {
             notif._limpiarEventos?.();
             notif.remove();
             notif = null;
@@ -2041,7 +2053,6 @@
                     </div>
                 </div>
                 <div class="maximus-eval-notif-cuerpo">
-                    <div class="maximus-eval-notif-estado" hidden><span class="maximus-eval-notif-spinner sm" aria-hidden="true"></span><span>Buscando evaluaciones...</span></div>
                     <div class="maximus-eval-notif-seccion" data-maximus-seccion="pendientes">
                         <div class="maximus-eval-notif-subtitulo">
                             <span>Evaluaciones pendientes:</span>
@@ -2055,7 +2066,7 @@
                             <span>Evaluaciones completadas:</span>
                             <span class="maximus-eval-notif-contador ok maximus-eval-notif-contador-completadas">0</span>
                         </div>
-                        <div class="maximus-eval-notif-vacio maximus-eval-notif-vacio-completadas">Ninguna completada</div>
+                        <div class="maximus-eval-notif-vacio maximus-eval-notif-vacio-completadas">No hay nada</div>
                         <ol class="maximus-eval-notif-lista maximus-eval-notif-lista-completadas"></ol>
                     </div>
                 </div>
@@ -2099,18 +2110,13 @@
             aplicarPosicionNotif(notif, evaluacionesNotifPos);
         }
 
-        const estadoEl = notif.querySelector('.maximus-eval-notif-estado');
-        if (estadoEl) {
-            estadoEl.hidden = !enAutomatizacion;
-        }
-
         const pendientes = items.filter(it => !it.completada);
         const completadas = items.filter(it => it.completada);
 
         const resumenEl = notif.querySelector('.maximus-eval-notif-resumen');
         if (resumenEl) {
             if (enAutomatizacion && !items.length) {
-                resumenEl.textContent = 'Buscando evaluaciones...';
+                resumenEl.textContent = 'Analizando curso...';
             } else if (!items.length) {
                 resumenEl.textContent = 'No tienes nada pendiente';
             } else {
@@ -2138,7 +2144,7 @@
                     if (enAutomatizacion) {
                         vacio.innerHTML = '<span class="maximus-eval-notif-spinner" role="status" aria-label="Cargando"></span>';
                     } else {
-                        vacio.textContent = esCompletada ? 'Ninguna completada' : 'No tienes nada pendiente';
+                        vacio.textContent = esCompletada ? 'No hay nada' : 'No tienes nada pendiente';
                     }
                     vacio.hidden = false;
                 }
@@ -2207,6 +2213,7 @@
     }
 
     function marcarEvaluaciones() {
+        reiniciarEstadoEvaluacionesSiCambioCurso();
         const marcados = new Set();
         const registros = [];
 
@@ -2290,6 +2297,7 @@
             evaluacionesBotonesAutoAbiertos = new WeakSet();
             evaluacionesNotificacionCerrada = false;
             evaluacionesAutomatizacionActiva = false;
+            evaluacionesAnalisisCompleto = false;
             if (evaluacionesTimerBackdrop) {
                 clearTimeout(evaluacionesTimerBackdrop);
                 evaluacionesTimerBackdrop = null;
@@ -2340,6 +2348,10 @@
             evaluacionesAutomatizacionActiva = true;
             alActualizar?.();
         };
+
+        if (!evaluacionesAnalisisCompleto) {
+            iniciarAutomatizacionVisual();
+        }
 
         const esperarHijosContenedor = async (card, btn, hijosAntes, ms = 2500) => {
             await esperarHasta(
@@ -2550,20 +2562,40 @@
                 }
                 evaluacionesAutomatizacionActiva = false;
                 alActualizar?.();
-            } else if (automatizacionMostrada && !reintentar && courseIdInicial === obtenerIdCursoActual()) {
-                evaluacionesTimerBackdrop = setTimeout(() => {
+            } else if (reintentar) {
+                if (evaluacionesTimerBackdrop) {
+                    clearTimeout(evaluacionesTimerBackdrop);
                     evaluacionesTimerBackdrop = null;
-                    if (!evaluacionesEnCurso) {
-                        evaluacionesAutomatizacionActiva = false;
-                        alActualizar?.();
-                    }
-                }, 450);
-            }
-
-            if (reintentar && !ocupado && enVistaOutlineCurso()) {
+                }
                 setTimeout(() => {
                     desplegarEvaluacionesAutomaticamente(alActualizar);
                 }, 350);
+            } else if (courseIdInicial !== obtenerIdCursoActual()) {
+                if (evaluacionesTimerBackdrop) {
+                    clearTimeout(evaluacionesTimerBackdrop);
+                    evaluacionesTimerBackdrop = null;
+                }
+                evaluacionesAutomatizacionActiva = false;
+                alActualizar?.();
+            } else {
+                evaluacionesAnalisisCompleto = true;
+                if (
+                    automatizacionMostrada ||
+                    (evaluacionesAutomatizacionActiva && !evaluacionesTimerBackdrop)
+                ) {
+                    if (evaluacionesTimerBackdrop) {
+                        clearTimeout(evaluacionesTimerBackdrop);
+                    }
+                    evaluacionesTimerBackdrop = setTimeout(() => {
+                        evaluacionesTimerBackdrop = null;
+                        if (!evaluacionesEnCurso && !evaluacionesReintentar) {
+                            evaluacionesAutomatizacionActiva = false;
+                            alActualizar?.();
+                        }
+                    }, 450);
+                } else if (!evaluacionesAutomatizacionActiva) {
+                    alActualizar?.();
+                }
             }
         }
     }
@@ -2659,9 +2691,9 @@
         }
 
         restaurarColoresFilas();
-        marcarEvaluaciones();
 
         if (ocupado) {
+            marcarEvaluaciones();
             return;
         }
 
@@ -2710,6 +2742,7 @@
 
         sincronizarBotonCurso();
         desplegarEvaluacionesAutomaticamente(marcarEvaluaciones);
+        marcarEvaluaciones();
     }
 
     async function rehidratarDomCurso(uActiva = null, pcActivo = null) {
@@ -2895,7 +2928,26 @@
         });
     }
 
-    function agendar() {
+    function mutacionesSoloMaximus(mutaciones) {
+        if (!Array.isArray(mutaciones) || !mutaciones.length) return false;
+        const esNodoMaximus = nodo =>
+            Boolean(nodo?.nodeType === 1 && (nodo.matches?.('[data-maximus]') || nodo.closest?.('[data-maximus]')));
+        return mutaciones.every(m => {
+            if (
+                m?.target?.closest?.('[data-maximus]') ||
+                m?.target?.parentElement?.closest?.('[data-maximus]')
+            ) {
+                return true;
+            }
+            const cambiados = [...(m?.addedNodes || []), ...(m?.removedNodes || [])];
+            return cambiados.length > 0 && cambiados.every(esNodoMaximus);
+        });
+    }
+
+    function agendar(mutaciones = null) {
+        if (mutacionesSoloMaximus(mutaciones)) {
+            return;
+        }
         if (enVistaDocumentoPantallaCompleta()) {
             limpiarPanelesEnVistaDocumento();
             return;
@@ -3144,6 +3196,7 @@
             }
 
             .maximus-eval-notif-spinner {
+                box-sizing: border-box !important;
                 display: inline-block !important;
                 width: 14px !important;
                 height: 14px !important;
@@ -3151,14 +3204,9 @@
                 border-top-color: #b4860b !important;
                 border-radius: 50% !important;
                 animation: maximus-giro .75s linear infinite !important;
+                will-change: transform !important;
                 vertical-align: middle !important;
                 flex: 0 0 auto !important;
-            }
-
-            .maximus-eval-notif-spinner.sm {
-                width: 11px !important;
-                height: 11px !important;
-                border-width: 1.5px !important;
             }
 
             .maximus-eval-notif {
@@ -3171,10 +3219,10 @@
                 display: flex !important;
                 flex-direction: column !important;
                 box-sizing: border-box !important;
-                padding: 10px 12px 10px 14px !important;
+                padding: 10px 12px !important;
                 background: #fff7cc !important;
                 border: 1px solid #f0dd8c !important;
-                box-shadow: inset 4px 0 0 #e5b82e, 0 12px 30px rgba(15, 23, 42, 0.26) !important;
+                box-shadow: 0 12px 30px rgba(15, 23, 42, 0.24) !important;
                 border-radius: 9px !important;
                 color: #26394b !important;
                 font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif !important;
@@ -3183,13 +3231,13 @@
 
             .maximus-eval-notif.en-automatizacion {
                 border-color: #e2b824 !important;
-                box-shadow: inset 4px 0 0 #d4a11a, 0 16px 38px rgba(15, 23, 42, 0.34) !important;
+                box-shadow: 0 14px 34px rgba(15, 23, 42, 0.28) !important;
             }
 
             .maximus-eval-notif.arrastrando {
                 transition: none !important;
                 user-select: none !important;
-                box-shadow: inset 4px 0 0 #d4a11a, 0 20px 46px rgba(15, 23, 42, 0.36) !important;
+                box-shadow: 0 18px 42px rgba(15, 23, 42, 0.34) !important;
             }
 
             .maximus-eval-notif.minimizada {
@@ -3291,25 +3339,32 @@
 
             .maximus-eval-notif-cuerpo {
                 overflow-y: auto !important;
+                overflow-x: hidden !important;
+                overscroll-behavior: contain !important;
                 min-height: 0 !important;
                 margin-top: 4px !important;
-                padding-right: 2px !important;
+                padding-right: 0 !important;
+                scrollbar-width: thin !important;
+                scrollbar-color: rgba(180, 134, 11, 0.35) transparent !important;
             }
 
-            .maximus-eval-notif-estado {
-                display: flex !important;
-                align-items: center !important;
-                gap: 6px !important;
-                margin: 4px 0 2px 0 !important;
-                padding: 4px 7px !important;
-                border-radius: 5px !important;
-                background: rgba(229, 184, 46, 0.16) !important;
-                font-size: 11px !important;
-                font-weight: 600 !important;
-                color: #6e5714 !important;
+            .maximus-eval-notif-cuerpo::-webkit-scrollbar {
+                width: 5px !important;
             }
 
-            .maximus-eval-notif-estado[hidden],
+            .maximus-eval-notif-cuerpo::-webkit-scrollbar-track {
+                background: transparent !important;
+            }
+
+            .maximus-eval-notif-cuerpo::-webkit-scrollbar-thumb {
+                background: rgba(180, 134, 11, 0.35) !important;
+                border-radius: 999px !important;
+            }
+
+            .maximus-eval-notif.en-automatizacion .maximus-eval-notif-cuerpo {
+                overflow: hidden !important;
+            }
+
             .maximus-eval-notif-vacio[hidden],
             .maximus-eval-notif-lista[hidden],
             .maximus-eval-notif-meta[hidden] {
@@ -3437,10 +3492,13 @@
                 display: flex !important;
                 align-items: center !important;
                 gap: 6px !important;
+                min-height: 22px !important;
                 font-size: 11.5px !important;
                 font-style: italic !important;
                 color: #7c5c0a !important;
-                padding: 2px 0 2px 4px !important;
+                padding: 3px 4px !important;
+                overflow: hidden !important;
+                contain: layout paint !important;
             }
 
             .maximus-eval-notif-check {
@@ -5995,6 +6053,7 @@
         removerPanelesEvaluacion();
         evaluacionesNotificacionCerrada = false;
         evaluacionesAutomatizacionActiva = false;
+        evaluacionesAnalisisCompleto = false;
         evaluacionesNotifPos = null;
         evaluacionesNotifMinimizada = false;
         if (evaluacionesTimerBackdrop) {

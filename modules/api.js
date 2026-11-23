@@ -45,10 +45,13 @@ export async function consultarHijosContenidoApi(courseId, contentId) {
     ];
 
     for (const endpoint of endpoints) {
+        const controlador = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const timer = controlador ? setTimeout(() => controlador.abort(), 8000) : null;
         try {
             const r = await fetch(endpoint, {
                 credentials: 'include',
-                headers: { Accept: 'application/json' }
+                headers: { Accept: 'application/json' },
+                ...(controlador ? { signal: controlador.signal } : {})
             });
             if (!r.ok) continue;
             const data = await r.json();
@@ -58,6 +61,8 @@ export async function consultarHijosContenidoApi(courseId, contentId) {
             }
         } catch {
             // Probar el siguiente endpoint disponible.
+        } finally {
+            if (timer) clearTimeout(timer);
         }
     }
 

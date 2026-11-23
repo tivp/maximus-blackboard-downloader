@@ -1045,6 +1045,7 @@ export function reiniciarEstadoEvaluacionesSiCambioCurso() {
         estado.evaluacionesBotonesAutoAbiertos = new WeakSet();
         estado.evaluacionesNotificacionCerrada = false;
         estado.evaluacionesAutomatizacionActiva = false;
+        estado.evaluacionesAnalisisCompleto = false;
         if (estado.evaluacionesTimerBackdrop) {
             clearTimeout(estado.evaluacionesTimerBackdrop);
             estado.evaluacionesTimerBackdrop = null;
@@ -1095,6 +1096,10 @@ export async function desplegarEvaluacionesAutomaticamente(alActualizar = null) 
         estado.evaluacionesAutomatizacionActiva = true;
         alActualizar?.();
     };
+
+    if (!estado.evaluacionesAnalisisCompleto) {
+        iniciarAutomatizacionVisual();
+    }
 
     const esperarHijosContenedor = async (card, btn, hijosAntes, ms = 2500) => {
         await esperarHasta(
@@ -1305,20 +1310,40 @@ export async function desplegarEvaluacionesAutomaticamente(alActualizar = null) 
             }
             estado.evaluacionesAutomatizacionActiva = false;
             alActualizar?.();
-        } else if (automatizacionMostrada && !reintentar && courseIdInicial === obtenerIdCursoActual()) {
-            estado.evaluacionesTimerBackdrop = setTimeout(() => {
+        } else if (reintentar) {
+            if (estado.evaluacionesTimerBackdrop) {
+                clearTimeout(estado.evaluacionesTimerBackdrop);
                 estado.evaluacionesTimerBackdrop = null;
-                if (!estado.evaluacionesEnCurso) {
-                    estado.evaluacionesAutomatizacionActiva = false;
-                    alActualizar?.();
-                }
-            }, 450);
-        }
-
-        if (reintentar && !estado.ocupado && enVistaOutlineCurso()) {
+            }
             setTimeout(() => {
                 desplegarEvaluacionesAutomaticamente(alActualizar);
             }, 350);
+        } else if (courseIdInicial !== obtenerIdCursoActual()) {
+            if (estado.evaluacionesTimerBackdrop) {
+                clearTimeout(estado.evaluacionesTimerBackdrop);
+                estado.evaluacionesTimerBackdrop = null;
+            }
+            estado.evaluacionesAutomatizacionActiva = false;
+            alActualizar?.();
+        } else {
+            estado.evaluacionesAnalisisCompleto = true;
+            if (
+                automatizacionMostrada ||
+                (estado.evaluacionesAutomatizacionActiva && !estado.evaluacionesTimerBackdrop)
+            ) {
+                if (estado.evaluacionesTimerBackdrop) {
+                    clearTimeout(estado.evaluacionesTimerBackdrop);
+                }
+                estado.evaluacionesTimerBackdrop = setTimeout(() => {
+                    estado.evaluacionesTimerBackdrop = null;
+                    if (!estado.evaluacionesEnCurso && !estado.evaluacionesReintentar) {
+                        estado.evaluacionesAutomatizacionActiva = false;
+                        alActualizar?.();
+                    }
+                }, 450);
+            } else if (!estado.evaluacionesAutomatizacionActiva) {
+                alActualizar?.();
+            }
         }
     }
 }
