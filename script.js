@@ -77,6 +77,8 @@
     let evaluacionesNotificacionCerrada = false;
     let evaluacionesAutomatizacionActiva = false;
     let evaluacionesTimerBackdrop = null;
+    let evaluacionesNotifPos = null;
+    let evaluacionesNotifMinimizada = false;
     const selectorIgnorarEval =
         '.js-review-state-icon-button,' +
         '[id^="content-item-overflow-menu-button-"],' +
@@ -1622,6 +1624,14 @@
         }
     }
 
+    function removerPanelesEvaluacion() {
+        document.querySelectorAll('.maximus-eval-notif').forEach(el => {
+            el._limpiarEventos?.();
+            el.remove();
+        });
+        document.querySelectorAll('.maximus-eval-backdrop').forEach(el => el.remove());
+    }
+
     function cerrarNotificacionEvaluaciones(marcarCerradaUsuario = true) {
         if (marcarCerradaUsuario) {
             evaluacionesNotificacionCerrada = true;
@@ -1631,7 +1641,7 @@
             evaluacionesTimerBackdrop = null;
         }
         evaluacionesAutomatizacionActiva = false;
-        document.querySelectorAll('.maximus-eval-backdrop, .maximus-eval-notif').forEach(el => el.remove());
+        removerPanelesEvaluacion();
     }
 
     function establecerEstadoAutomatizacionEvaluaciones(activo, alRevalidar = null) {
@@ -1731,9 +1741,11 @@
         }, 1800);
     }
 
-    function esEvaluacionCompletada(fila, card = null) {
+    function obtenerEstadoEvaluacion(fila, card = null) {
         const raiz = card || fila;
-        if (!raiz) return false;
+        if (!raiz) {
+            return { completada: false, estadoLabel: 'Sin iniciar', estadoTipo: 'sin-iniciar' };
+        }
 
         const perteneceATarjeta = el => {
             if (!card) return true;
@@ -1744,37 +1756,263 @@
         const botonesEstado = raiz.querySelectorAll(
             '.js-review-state-icon-button, button[role="checkbox"][data-analytics-id*="review-state"], button[role="checkbox"][aria-label*="Estado de"]'
         );
+        let resultadoNoCompletado = null;
+
         for (const btn of botonesEstado) {
             if (!perteneceATarjeta(btn)) continue;
             const ariaChecked = (btn.getAttribute('aria-checked') || '').trim().toLowerCase();
-            if (ariaChecked === 'true') return true;
-            if (ariaChecked === 'false' || ariaChecked === 'mixed') return false;
+            if (ariaChecked === 'true') {
+                return { completada: true, estadoLabel: 'Completada', estadoTipo: 'completada' };
+            }
+            if (ariaChecked === 'mixed') {
+                resultadoNoCompletado = { completada: false, estadoLabel: 'Iniciado', estadoTipo: 'iniciada' };
+                break;
+            }
+            if (ariaChecked === 'false') {
+                resultadoNoCompletado = { completada: false, estadoLabel: 'Sin iniciar', estadoTipo: 'sin-iniciar' };
+                break;
+            }
 
             const label = texto(btn.getAttribute('aria-label') || '');
-            if (/:\s*completad[oa]\b/i.test(label)) return true;
-            if (/:\s*(?:iniciad[oa]|sin\s+iniciar|no\s+iniciad[oa])\b/i.test(label)) return false;
+            if (/:\s*completad[oa]\b/i.test(label)) {
+                return { completada: true, estadoLabel: 'Completada', estadoTipo: 'completada' };
+            }
+            if (/:\s*iniciad[oa]\b/i.test(label)) {
+                resultadoNoCompletado = { completada: false, estadoLabel: 'Iniciado', estadoTipo: 'iniciada' };
+                break;
+            }
+            if (/:\s*(?:sin\s+iniciar|no\s+iniciad[oa])\b/i.test(label)) {
+                resultadoNoCompletado = { completada: false, estadoLabel: 'Sin iniciar', estadoTipo: 'sin-iniciar' };
+                break;
+            }
 
-            if (btn.querySelector('svg[class*="completed"]')) return true;
+            if (btn.querySelector('svg[class*="completed"]')) {
+                return { completada: true, estadoLabel: 'Completada', estadoTipo: 'completada' };
+            }
         }
 
-        const svgsCompletados = raiz.querySelectorAll('svg[class*="makeStylescompleted"], [role="checkbox"] svg[class*="completed"]');
-        for (const svg of svgsCompletados) {
-            if (perteneceATarjeta(svg)) return true;
+        if (!resultadoNoCompletado) {
+            const svgsCompletados = raiz.querySelectorAll(
+                'svg[class*="makeStylescompleted"], [role="checkbox"] svg[class*="completed"]'
+            );
+            for (const svg of svgsCompletados) {
+                if (perteneceATarjeta(svg)) {
+                    return { completada: true, estadoLabel: 'Completada', estadoTipo: 'completada' };
+                }
+            }
         }
 
-        return false;
+        if (card && estaTarjetaBloqueada(card)) {
+            return { completada: false, estadoLabel: 'Bloqueada', estadoTipo: 'bloqueada' };
+        }
+
+        return resultadoNoCompletado || {
+            completada: false,
+            estadoLabel: 'Sin iniciar',
+            estadoTipo: 'sin-iniciar'
+        };
+    }
+
+    function esEvaluacionCompletada(fila, card = null) {
+        return obtenerEstadoEvaluacion(fila, card).completada;
+    }
+
+    function obtenerMetaEvaluacion(fila, card = null) {
+        const raiz = card || fila;
+        let unidad = '';
+        if (raiz) {
+            let fallbackCarpeta = '';
+            for (let p = raiz.parentElement?.closest(TARJETAS); p; p = p.parentElement?.closest(TARJETAS)) {
+                const nom = nombreCard(p);
+                if (!nom) continue;
+                if (esModuloCard(p)) {
+                    unidad = nom;
+                    break;
+                }
+                if (!fallbackCarpeta) {
+                    fallbackCarpeta = nom;
+                }
+            }
+            if (!unidad) {
+                unidad = fallbackCarpeta;
+            }
+        }
+
+        const detalles = [];
+        const detalleEls = (raiz || document).querySelectorAll(
+            '[class*="gradeInfo-"] [class*="gradeDetail-"], [class*="gradeDetail-"]'
+        );
+        for (const el of detalleEls) {
+            if (card && el.closest(TARJETAS) !== card) continue;
+            const t = texto(el.textContent || '');
+            if (t && !detalles.includes(t)) {
+                detalles.push(t);
+            }
+        }
+
+        return {
+            unidad,
+            detalles: detalles.join(' · ')
+        };
+    }
+
+    function aplicarPosicionNotif(notif, pos) {
+        if (!notif) return;
+        if (!pos || typeof pos.left !== 'number' || typeof pos.top !== 'number') {
+            notif.style.removeProperty?.('left');
+            notif.style.removeProperty?.('top');
+            notif.style.removeProperty?.('right');
+            notif.style.removeProperty?.('bottom');
+            notif.style.removeProperty?.('transform');
+            delete notif.dataset.maximusPosCustom;
+            return;
+        }
+
+        const anchoWin = Math.max(window.innerWidth || 0, 320);
+        const altoWin = Math.max(window.innerHeight || 0, 240);
+        const rect = notif.getBoundingClientRect?.() || { width: 0, height: 0 };
+        const w = rect.width > 0 ? rect.width : 360;
+        const h = rect.height > 0 ? rect.height : 180;
+        const maxLeft = Math.max(8, anchoWin - w - 8);
+        const maxTop = Math.max(8, altoWin - h - 8);
+        const left = Math.min(Math.max(8, Math.round(pos.left)), maxLeft);
+        const top = Math.min(Math.max(8, Math.round(pos.top)), maxTop);
+
+        evaluacionesNotifPos = { left, top };
+        notif.dataset.maximusPosCustom = '1';
+        notif.style.setProperty('left', `${left}px`, 'important');
+        notif.style.setProperty('top', `${top}px`, 'important');
+        notif.style.setProperty('right', 'auto', 'important');
+        notif.style.setProperty('bottom', 'auto', 'important');
+        notif.style.setProperty('transform', 'none', 'important');
+    }
+
+    function habilitarArrastreNotif(notif) {
+        const cabecera = notif.querySelector('.maximus-eval-notif-cabecera');
+        if (!cabecera) return;
+
+        let arrastrando = false;
+        let movio = false;
+        let tipoArrastre = '';
+        let origenX = 0;
+        let origenY = 0;
+        let baseLeft = 0;
+        let baseTop = 0;
+
+        const limpiar = () => {
+            window.removeEventListener('pointermove', alPointerMove);
+            window.removeEventListener('pointerup', alPointerUp);
+            window.removeEventListener('pointercancel', alPointerCancel);
+            window.removeEventListener('mousemove', alMouseMove);
+            window.removeEventListener('mouseup', alMouseUp);
+            window.removeEventListener('resize', alResize);
+        };
+
+        const procesarMovimiento = (e, tipo) => {
+            if (!arrastrando || tipo !== tipoArrastre) return;
+            if (!notif.isConnected) {
+                limpiar();
+                return;
+            }
+            const dx = (e.clientX ?? 0) - origenX;
+            const dy = (e.clientY ?? 0) - origenY;
+            if (!movio && Math.hypot(dx, dy) < 3) {
+                return;
+            }
+            movio = true;
+            notif.classList.add('arrastrando');
+            aplicarPosicionNotif(notif, { left: baseLeft + dx, top: baseTop + dy });
+        };
+
+        const terminarArrastre = tipo => {
+            if (!arrastrando || (tipo && tipo !== tipoArrastre)) return;
+            arrastrando = false;
+            tipoArrastre = '';
+            notif.classList.remove('arrastrando');
+        };
+
+        const iniciar = (e, tipo) => {
+            if (arrastrando) return;
+            if (e.button != null && e.button !== 0) return;
+            const target = e.target?.nodeType === 3 ? e.target.parentElement : e.target;
+            if (target?.closest?.('button, a, input, select, textarea')) return;
+
+            const rect = notif.getBoundingClientRect?.() || { left: 20, top: 20 };
+            const fallbackLeft = Math.max(8, (window.innerWidth || 1280) - (rect.width > 0 ? rect.width : 400) - 20);
+            arrastrando = true;
+            movio = false;
+            tipoArrastre = tipo;
+            origenX = e.clientX ?? 0;
+            origenY = e.clientY ?? 0;
+            baseLeft = Number.isFinite(rect.left) && (rect.width > 0 || rect.left > 0) ? rect.left : (evaluacionesNotifPos?.left ?? fallbackLeft);
+            baseTop = Number.isFinite(rect.top) ? rect.top : (evaluacionesNotifPos?.top ?? 20);
+
+            e.preventDefault?.();
+        };
+
+        const alPointerMove = e => procesarMovimiento(e, 'pointer');
+        const alPointerUp = () => terminarArrastre('pointer');
+        const alPointerCancel = () => terminarArrastre();
+        const alMouseMove = e => procesarMovimiento(e, 'mouse');
+        const alMouseUp = () => terminarArrastre('mouse');
+        const alResize = () => {
+            if (!notif.isConnected) {
+                limpiar();
+                return;
+            }
+            if (evaluacionesNotifPos) {
+                aplicarPosicionNotif(notif, evaluacionesNotifPos);
+            }
+        };
+
+        cabecera.addEventListener('pointerdown', e => iniciar(e, 'pointer'));
+        cabecera.addEventListener('mousedown', e => iniciar(e, 'mouse'));
+        cabecera.addEventListener('dblclick', e => {
+            const target = e.target?.nodeType === 3 ? e.target.parentElement : e.target;
+            if (target?.closest?.('button, a')) return;
+            evaluacionesNotifPos = null;
+            aplicarPosicionNotif(notif, null);
+        });
+
+        window.addEventListener('pointermove', alPointerMove);
+        window.addEventListener('pointerup', alPointerUp);
+        window.addEventListener('pointercancel', alPointerCancel);
+        window.addEventListener('mousemove', alMouseMove);
+        window.addEventListener('mouseup', alMouseUp);
+        window.addEventListener('resize', alResize, { passive: true });
+
+        notif._limpiarEventos = limpiar;
+    }
+
+    function sincronizarEstadoMinNotif(elNotif) {
+        if (!elNotif) return;
+        const minBtn = elNotif.querySelector('.maximus-eval-notif-min');
+        const cuerpo = elNotif.querySelector('.maximus-eval-notif-cuerpo');
+        const min = Boolean(evaluacionesNotifMinimizada);
+        if (min) {
+            elNotif.classList.add('minimizada');
+        } else {
+            elNotif.classList.remove('minimizada');
+        }
+        if (cuerpo) cuerpo.hidden = min;
+        if (minBtn) {
+            minBtn.innerHTML = min ? '+' : '&minus;';
+            minBtn.setAttribute('aria-label', min ? 'Expandir' : 'Minimizar');
+            minBtn.setAttribute('title', min ? 'Expandir' : 'Minimizar');
+            minBtn.setAttribute('aria-expanded', min ? 'false' : 'true');
+        }
     }
 
     function actualizarNotificacionEvaluaciones(items = []) {
         if (ocupado || evaluacionesNotificacionCerrada || !enVistaOutlineCurso()) {
-            document.querySelectorAll('.maximus-eval-backdrop, .maximus-eval-notif').forEach(el => el.remove());
+            removerPanelesEvaluacion();
             return;
         }
 
         const enAutomatizacion = Boolean(evaluacionesAutomatizacionActiva);
 
         if (!items.length && !enAutomatizacion) {
-            document.querySelectorAll('.maximus-eval-backdrop, .maximus-eval-notif').forEach(el => el.remove());
+            removerPanelesEvaluacion();
             return;
         }
 
@@ -1796,7 +2034,8 @@
         }
 
         let notif = document.querySelector('.maximus-eval-notif');
-        if (notif && !notif.querySelector('.maximus-eval-notif-lista-pendientes')) {
+        if (notif && !notif.querySelector('.maximus-eval-notif-cuerpo')) {
+            notif._limpiarEventos?.();
             notif.remove();
             notif = null;
         }
@@ -1808,32 +2047,51 @@
             notif.setAttribute('aria-label', 'Índice de evaluaciones');
 
             notif.innerHTML = `
-                <div class="maximus-eval-notif-cabecera">
-                    <div class="maximus-eval-notif-titulo">Índice de evaluaciones</div>
-                    <button class="maximus-eval-notif-cerrar" type="button" aria-label="Cerrar notificación" title="Cerrar">&times;</button>
-                </div>
-                <div class="maximus-eval-notif-estado" hidden>Buscando y desplegando evaluaciones...</div>
-                <div class="maximus-eval-notif-seccion" data-maximus-seccion="pendientes">
-                    <div class="maximus-eval-notif-subtitulo">
-                        <span>Evaluaciones pendientes:</span>
-                        <span class="maximus-eval-notif-contador maximus-eval-notif-contador-pendientes">0</span>
+                <div class="maximus-eval-notif-cabecera" title="Arrastra para mover · Doble clic para volver a la esquina">
+                    <div class="maximus-eval-notif-cabecera-izq">
+                        <span class="maximus-eval-notif-grip" aria-hidden="true">&#8942;&#8942;</span>
+                        <div class="maximus-eval-notif-titulos">
+                            <div class="maximus-eval-notif-titulo">Índice de evaluaciones</div>
+                            <div class="maximus-eval-notif-resumen"></div>
+                        </div>
                     </div>
-                    <div class="maximus-eval-notif-vacio maximus-eval-notif-vacio-pendientes">Ninguna</div>
-                    <ol class="maximus-eval-notif-lista maximus-eval-notif-lista-pendientes"></ol>
-                </div>
-                <div class="maximus-eval-notif-seccion" data-maximus-seccion="completadas">
-                    <div class="maximus-eval-notif-subtitulo">
-                        <span>Evaluaciones completadas:</span>
-                        <span class="maximus-eval-notif-contador ok maximus-eval-notif-contador-completadas">0</span>
+                    <div class="maximus-eval-notif-controles">
+                        <button class="maximus-eval-notif-min" type="button" aria-label="Minimizar" title="Minimizar">&minus;</button>
+                        <button class="maximus-eval-notif-cerrar" type="button" aria-label="Cerrar notificación" title="Cerrar">&times;</button>
                     </div>
-                    <div class="maximus-eval-notif-vacio maximus-eval-notif-vacio-completadas">Ninguna</div>
-                    <ol class="maximus-eval-notif-lista maximus-eval-notif-lista-completadas"></ol>
+                </div>
+                <div class="maximus-eval-notif-cuerpo">
+                    <div class="maximus-eval-notif-estado" hidden>Buscando y desplegando evaluaciones...</div>
+                    <div class="maximus-eval-notif-seccion" data-maximus-seccion="pendientes">
+                        <div class="maximus-eval-notif-subtitulo">
+                            <span>Evaluaciones pendientes:</span>
+                            <span class="maximus-eval-notif-contador maximus-eval-notif-contador-pendientes">0</span>
+                        </div>
+                        <div class="maximus-eval-notif-vacio maximus-eval-notif-vacio-pendientes">Ninguna</div>
+                        <ol class="maximus-eval-notif-lista maximus-eval-notif-lista-pendientes"></ol>
+                    </div>
+                    <div class="maximus-eval-notif-seccion" data-maximus-seccion="completadas">
+                        <div class="maximus-eval-notif-subtitulo">
+                            <span>Evaluaciones completadas:</span>
+                            <span class="maximus-eval-notif-contador ok maximus-eval-notif-contador-completadas">0</span>
+                        </div>
+                        <div class="maximus-eval-notif-vacio maximus-eval-notif-vacio-completadas">Ninguna</div>
+                        <ol class="maximus-eval-notif-lista maximus-eval-notif-lista-completadas"></ol>
+                    </div>
                 </div>
             `;
 
             for (const evento of ['pointerdown', 'mousedown', 'mouseup', 'click', 'keydown']) {
                 notif.addEventListener(evento, e => e.stopPropagation());
             }
+
+            const btnMin = notif.querySelector('.maximus-eval-notif-min');
+            btnMin?.addEventListener('click', e => {
+                e.preventDefault();
+                e.stopPropagation();
+                evaluacionesNotifMinimizada = !evaluacionesNotifMinimizada;
+                sincronizarEstadoMinNotif(notif);
+            });
 
             const btnCerrar = notif.querySelector('.maximus-eval-notif-cerrar');
             btnCerrar?.addEventListener('click', e => {
@@ -1843,7 +2101,13 @@
             });
 
             contenedorRaiz.append(notif);
+            habilitarArrastreNotif(notif);
+            if (evaluacionesNotifPos) {
+                aplicarPosicionNotif(notif, evaluacionesNotifPos);
+            }
         }
+
+        sincronizarEstadoMinNotif(notif);
 
         if (enAutomatizacion) {
             notif.classList.add('en-automatizacion');
@@ -1851,19 +2115,31 @@
             notif.classList.remove('en-automatizacion');
         }
 
+        if (evaluacionesNotifPos) {
+            aplicarPosicionNotif(notif, evaluacionesNotifPos);
+        }
+
         const estadoEl = notif.querySelector('.maximus-eval-notif-estado');
         if (estadoEl) {
             estadoEl.hidden = !enAutomatizacion;
         }
 
-        const firma = `${enAutomatizacion ? 1 : 0}::${items.map(it => `${it.id}:${it.completada ? 1 : 0}:${it.titulo}`).join('||')}`;
+        const pendientes = items.filter(it => !it.completada);
+        const completadas = items.filter(it => it.completada);
+
+        const resumenEl = notif.querySelector('.maximus-eval-notif-resumen');
+        if (resumenEl) {
+            resumenEl.textContent =
+                enAutomatizacion && !items.length
+                    ? 'Analizando curso...'
+                    : `${pendientes.length} ${pendientes.length === 1 ? 'pendiente' : 'pendientes'} · ${completadas.length} ${completadas.length === 1 ? 'completada' : 'completadas'}`;
+        }
+
+        const firma = `${enAutomatizacion ? 1 : 0}::${items.map(it => `${it.id}:${it.estadoTipo || ''}:${it.titulo}:${it.unidad || ''}:${it.detalles || ''}`).join('||')}`;
         if (notif.dataset.maximusFirma === firma) {
             return;
         }
         notif.dataset.maximusFirma = firma;
-
-        const pendientes = items.filter(it => !it.completada);
-        const completadas = items.filter(it => it.completada);
 
         const renderizarSeccion = (tipo, listaSeccion, esCompletada) => {
             const contador = notif.querySelector(`.maximus-eval-notif-contador-${tipo}`);
@@ -1889,6 +2165,9 @@
                 const li = document.createElement('li');
                 li.className = 'maximus-eval-notif-item';
 
+                const topRow = document.createElement('div');
+                topRow.className = 'maximus-eval-notif-item-cabecera';
+
                 const num = document.createElement('span');
                 num.className = 'maximus-eval-notif-num';
                 num.textContent = `${idx + 1}.`;
@@ -1908,10 +2187,27 @@
                     check.className = 'maximus-eval-notif-check';
                     check.setAttribute('aria-hidden', 'true');
                     check.textContent = '✓';
-                    li.append(num, check, enlace);
+                    topRow.append(num, check, enlace);
                 } else {
-                    li.append(num, enlace);
+                    topRow.append(num, enlace);
+                    if (item.estadoLabel) {
+                        const tag = document.createElement('span');
+                        tag.className = `maximus-eval-notif-tag maximus-eval-notif-tag-${item.estadoTipo || 'sin-iniciar'}`;
+                        tag.textContent = item.estadoLabel;
+                        topRow.append(tag);
+                    }
                 }
+
+                li.append(topRow);
+
+                const metaTexto = [item.unidad, item.detalles].filter(Boolean).join(' · ');
+                if (metaTexto) {
+                    const meta = document.createElement('div');
+                    meta.className = 'maximus-eval-notif-meta';
+                    meta.textContent = metaTexto;
+                    li.append(meta);
+                }
+
                 lista.append(li);
             });
         };
@@ -1969,13 +2265,24 @@
         const idsUsados = new Set();
         const items = registros.map(({ fila, card }, idx) => {
             const titulo = obtenerTituloEvaluacion(fila, card);
-            const completada = esEvaluacionCompletada(fila, card);
+            const { completada, estadoLabel, estadoTipo } = obtenerEstadoEvaluacion(fila, card);
+            const { unidad, detalles } = obtenerMetaEvaluacion(fila, card);
             const hashId = generarHashIdEvaluacion(titulo, idx, idsUsados);
             fila.dataset.maximusEvalId = hashId;
             if (!fila.id || fila.id.startsWith('maximus-eval-')) {
                 fila.id = hashId;
             }
-            return { id: hashId, titulo, completada, fila, card };
+            return {
+                id: hashId,
+                titulo,
+                completada,
+                estadoLabel,
+                estadoTipo,
+                unidad,
+                detalles,
+                fila,
+                card
+            };
         });
 
         actualizarNotificacionEvaluaciones(items);
@@ -2332,7 +2639,8 @@
     // ==================================================
 
     function limpiarPanelesEnVistaDocumento() {
-        document.querySelectorAll('.maximus-panel, .maximus-eval-backdrop, .maximus-eval-notif').forEach(p => p.remove());
+        document.querySelectorAll('.maximus-panel').forEach(p => p.remove());
+        removerPanelesEvaluacion();
     }
 
     function restaurarColoresFilas() {
@@ -2861,35 +3169,77 @@
                 top: 20px !important;
                 right: 20px !important;
                 z-index: 2147483646 !important;
-                width: min(390px, calc(100vw - 32px)) !important;
-                max-height: min(75vh, 520px) !important;
+                width: min(400px, calc(100vw - 28px)) !important;
+                max-height: min(78vh, 560px) !important;
                 display: flex !important;
                 flex-direction: column !important;
                 box-sizing: border-box !important;
-                padding: 13px 16px 13px 18px !important;
+                padding: 11px 14px 12px 16px !important;
                 background: #fff7cc !important;
                 border: 1px solid #f0dd8c !important;
                 box-shadow: inset 4px 0 0 #e5b82e, 0 14px 34px rgba(15, 23, 42, 0.28) !important;
-                border-radius: 8px !important;
+                border-radius: 10px !important;
                 color: #26394b !important;
                 font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif !important;
-                transition: top .2s ease, left .2s ease, right .2s ease, transform .2s ease, box-shadow .2s ease !important;
+                transition: box-shadow .2s ease, border-color .2s ease !important;
             }
 
             .maximus-eval-notif.en-automatizacion {
-                top: 84px !important;
-                left: 50% !important;
-                right: auto !important;
-                transform: translateX(-50%) !important;
-                box-shadow: inset 4px 0 0 #e5b82e, 0 22px 48px rgba(0, 0, 0, 0.45) !important;
+                border-color: #e2b824 !important;
+                box-shadow: inset 4px 0 0 #d4a11a, 0 20px 46px rgba(0, 0, 0, 0.42) !important;
+            }
+
+            .maximus-eval-notif.arrastrando {
+                transition: none !important;
+                user-select: none !important;
+                box-shadow: inset 4px 0 0 #d4a11a, 0 22px 52px rgba(15, 23, 42, 0.36) !important;
+            }
+
+            .maximus-eval-notif.minimizada {
+                max-height: none !important;
+                width: min(320px, calc(100vw - 28px)) !important;
+            }
+
+            .maximus-eval-notif.minimizada .maximus-eval-notif-cuerpo {
+                display: none !important;
             }
 
             .maximus-eval-notif-cabecera {
                 display: flex !important;
-                align-items: flex-start !important;
+                align-items: center !important;
                 justify-content: space-between !important;
                 gap: 8px !important;
-                padding-right: 24px !important;
+                cursor: grab !important;
+                user-select: none !important;
+                touch-action: none !important;
+            }
+
+            .maximus-eval-notif.arrastrando .maximus-eval-notif-cabecera {
+                cursor: grabbing !important;
+            }
+
+            .maximus-eval-notif-cabecera-izq {
+                display: flex !important;
+                align-items: center !important;
+                gap: 7px !important;
+                min-width: 0 !important;
+                flex: 1 1 auto !important;
+            }
+
+            .maximus-eval-notif-grip {
+                color: #9e7a14 !important;
+                font-size: 13px !important;
+                font-weight: 700 !important;
+                line-height: 1 !important;
+                letter-spacing: -1px !important;
+                flex: 0 0 auto !important;
+                opacity: 0.85 !important;
+            }
+
+            .maximus-eval-notif-titulos {
+                display: flex !important;
+                flex-direction: column !important;
+                min-width: 0 !important;
             }
 
             .maximus-eval-notif-titulo {
@@ -2897,14 +3247,26 @@
                 padding: 0 !important;
                 font-weight: 700 !important;
                 font-size: 13px !important;
-                line-height: 1.35 !important;
+                line-height: 1.25 !important;
                 color: #26394b !important;
             }
 
+            .maximus-eval-notif-resumen {
+                font-size: 11px !important;
+                line-height: 1.25 !important;
+                color: #6e5714 !important;
+                margin-top: 1px !important;
+            }
+
+            .maximus-eval-notif-controles {
+                display: inline-flex !important;
+                align-items: center !important;
+                gap: 4px !important;
+                flex: 0 0 auto !important;
+            }
+
+            .maximus-eval-notif-min,
             .maximus-eval-notif-cerrar {
-                position: absolute !important;
-                top: 8px !important;
-                right: 8px !important;
                 width: 24px !important;
                 height: 24px !important;
                 display: inline-flex !important;
@@ -2913,14 +3275,16 @@
                 padding: 0 !important;
                 margin: 0 !important;
                 border: 1px solid transparent !important;
-                border-radius: 4px !important;
+                border-radius: 5px !important;
                 background: transparent !important;
                 color: #5c4b12 !important;
-                font: 700 16px/1 Arial, sans-serif !important;
+                font: 700 15px/1 Arial, sans-serif !important;
                 cursor: pointer !important;
                 transition: background-color .15s, border-color .15s, color .15s !important;
             }
 
+            .maximus-eval-notif-min:hover,
+            .maximus-eval-notif-min:focus-visible,
             .maximus-eval-notif-cerrar:hover,
             .maximus-eval-notif-cerrar:focus-visible {
                 background: rgba(229, 184, 46, 0.25) !important;
@@ -2928,22 +3292,34 @@
                 color: #26394b !important;
             }
 
+            .maximus-eval-notif-cuerpo {
+                overflow-y: auto !important;
+                min-height: 0 !important;
+                margin-top: 4px !important;
+                padding-right: 2px !important;
+            }
+
             .maximus-eval-notif-estado {
-                margin-top: 6px !important;
+                margin: 4px 0 2px 0 !important;
+                padding: 4px 8px !important;
+                border-radius: 5px !important;
+                background: rgba(229, 184, 46, 0.16) !important;
                 font-size: 12px !important;
+                font-weight: 600 !important;
                 color: #6e5714 !important;
             }
 
             .maximus-eval-notif-estado[hidden],
-            .maximus-eval-notif-lista[hidden] {
+            .maximus-eval-notif-vacio[hidden],
+            .maximus-eval-notif-lista[hidden],
+            .maximus-eval-notif-meta[hidden] {
                 display: none !important;
             }
 
             .maximus-eval-notif-lista {
-                margin: 8px 0 0 0 !important;
+                margin: 6px 0 0 0 !important;
                 padding: 0 !important;
                 list-style: none !important;
-                overflow-y: auto !important;
                 display: flex !important;
                 flex-direction: column !important;
                 gap: 6px !important;
@@ -2951,12 +3327,19 @@
 
             .maximus-eval-notif-item {
                 display: flex !important;
+                flex-direction: column !important;
+                gap: 3px !important;
+                padding: 6px 8px !important;
+                border-radius: 6px !important;
+                background: rgba(255, 255, 255, 0.68) !important;
+                border: 1px solid rgba(240, 221, 140, 0.85) !important;
+            }
+
+            .maximus-eval-notif-item-cabecera {
+                display: flex !important;
                 align-items: baseline !important;
                 gap: 6px !important;
-                padding: 4px 8px !important;
-                border-radius: 5px !important;
-                background: rgba(255, 255, 255, 0.58) !important;
-                border: 1px solid rgba(240, 221, 140, 0.75) !important;
+                min-width: 0 !important;
             }
 
             .maximus-eval-notif-num {
@@ -2972,12 +3355,46 @@
                 text-decoration: none !important;
                 word-break: break-word !important;
                 cursor: pointer !important;
+                flex: 1 1 auto !important;
+                min-width: 0 !important;
             }
 
             .maximus-eval-notif-link:hover,
             .maximus-eval-notif-link:focus-visible {
                 text-decoration: underline !important;
                 color: #0550ae !important;
+            }
+
+            .maximus-eval-notif-tag {
+                flex: 0 0 auto !important;
+                font-size: 10px !important;
+                font-weight: 700 !important;
+                padding: 1px 6px !important;
+                border-radius: 999px !important;
+                white-space: nowrap !important;
+            }
+
+            .maximus-eval-notif-tag-sin-iniciar {
+                background: rgba(212, 161, 26, 0.18) !important;
+                color: #6b4e00 !important;
+            }
+
+            .maximus-eval-notif-tag-iniciada {
+                background: rgba(9, 105, 218, 0.14) !important;
+                color: #0550ae !important;
+            }
+
+            .maximus-eval-notif-tag-bloqueada {
+                background: rgba(100, 116, 139, 0.16) !important;
+                color: #475569 !important;
+            }
+
+            .maximus-eval-notif-meta {
+                padding-left: 24px !important;
+                font-size: 11px !important;
+                line-height: 1.35 !important;
+                color: #5c4b12 !important;
+                word-break: break-word !important;
             }
 
             .maximus-eval-notif-seccion {
@@ -3022,11 +3439,6 @@
                 font-style: italic !important;
                 color: #7c5c0a !important;
                 padding: 2px 0 2px 4px !important;
-            }
-
-            .maximus-eval-notif-vacio[hidden],
-            .maximus-eval-notif-lista[hidden] {
-                display: none !important;
             }
 
             .maximus-eval-notif-check {
@@ -5577,9 +5989,12 @@
     function iniciar() {
         if (!compatible()) return;
 
-        document.querySelectorAll('.maximus-panel, .maximus-eval-backdrop, .maximus-eval-notif').forEach(p => p.remove());
+        document.querySelectorAll('.maximus-panel').forEach(p => p.remove());
+        removerPanelesEvaluacion();
         evaluacionesNotificacionCerrada = false;
         evaluacionesAutomatizacionActiva = false;
+        evaluacionesNotifPos = null;
+        evaluacionesNotifMinimizada = false;
         if (evaluacionesTimerBackdrop) {
             clearTimeout(evaluacionesTimerBackdrop);
             evaluacionesTimerBackdrop = null;

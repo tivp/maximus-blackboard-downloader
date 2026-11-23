@@ -484,6 +484,8 @@ export function iniciar() {
     estado.evaluacionesBotonesAutoAbiertos = new WeakSet();
     estado.evaluacionesNotificacionCerrada = false;
     estado.evaluacionesAutomatizacionActiva = false;
+    estado.evaluacionesNotifPos = null;
+    estado.evaluacionesNotifMinimizada = false;
     if (estado.evaluacionesTimerBackdrop) {
         clearTimeout(estado.evaluacionesTimerBackdrop);
         estado.evaluacionesTimerBackdrop = null;

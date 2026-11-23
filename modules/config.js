@@ -54,7 +54,9 @@ export const estado = {
     evaluacionesBotonesAutoAbiertos: new WeakSet(),
     evaluacionesNotificacionCerrada: false,
     evaluacionesAutomatizacionActiva: false,
-    evaluacionesTimerBackdrop: null
+    evaluacionesTimerBackdrop: null,
+    evaluacionesNotifPos: null,
+    evaluacionesNotifMinimizada: false
 };
 
 // Sincroniza el atributo en <html> para que page-hook.js sepa cuándo hay una descarga en curso.
@@ -68,7 +70,11 @@ export function marcarOcupado(valor) {
                 clearTimeout(estado.evaluacionesTimerBackdrop);
                 estado.evaluacionesTimerBackdrop = null;
             }
-            document.querySelectorAll('.maximus-eval-backdrop, .maximus-eval-notif').forEach(el => el.remove());
+            document.querySelectorAll('.maximus-eval-notif').forEach(el => {
+                el._limpiarEventos?.();
+                el.remove();
+            });
+            document.querySelectorAll('.maximus-eval-backdrop').forEach(el => el.remove());
         } else {
             delete document.documentElement.dataset.maximusOcupado;
         }
