@@ -82,6 +82,9 @@
     let evaluacionesTimerBackdrop = null;
     let evaluacionesNotifPos = null;
     let evaluacionesNotifMinimizada = false;
+    let usuarioActualId = '';
+    let evaluacionesApiPorCurso = null;
+    let evaluacionesRefrescarCb = null;
     const selectorIgnorarEval =
         '.js-review-state-icon-button,' +
         '[id^="content-item-overflow-menu-button-"],' +
@@ -1439,6 +1442,479 @@
         };
     }
 
+    const RE_COLUMNA_TOTAL =
+        /^(?:total|weighted\s+total|nota\s+final|promedio(?:\s+final)?|calificaci[oó]n\s+(?:total|final)|overall\s+grade)$/i;
+
+    async function fetchJsonApi(endpoint, timeoutMs = 8000) {
+        const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const timer = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs) : null;
+        try {
+            const r = await fetch(endpoint, {
+                credentials: 'include',
+                headers: { Accept: 'application/json' },
+                ...(ctrl ? { signal: ctrl.signal } : {})
+            });
+            if (!r?.ok) return null;
+            return await r.json();
+        } catch {
+            return null;
+        } finally {
+            if (timer) clearTimeout(timer);
+        }
+    }
+
+    function esColumnaEvaluacionValidaApi(col) {
+        if (!col) return false;
+        if (col.visible === false || col.availability?.available === 'No') return false;
+        if (col.externalGrade === true) return false;
+        if (col.calculationType && col.calculationType !== 'NON_CALCULATED') return false;
+        if (col.formula) return false;
+        const titulo = texto(col.effectiveColumnName || col.columnName || col.name || '');
+        if (!titulo || RE.encuestaOSondeo.test(titulo)) return false;
+        if (!col.contentId && RE_COLUMNA_TOTAL.test(titulo)) return false;
+        return true;
+    }
+
+    function esIntentoBorradorApi(att) {
+        const st = String(att?.status || '').trim();
+        return /^in_?progress$/i.test(st);
+    }
+
+    function extraerIdsIntentoApi(grade) {
+        if (!grade) return [];
+        return [
+            ...new Set(
+                [
+                    grade.lastAttemptId,
+                    grade.firstAttemptId,
+                    grade.highestAttemptId,
+                    grade.lastAttempt?.id
+                ].filter(id => typeof id === 'string' && id.trim())
+            )
+        ];
+    }
+
+    function formatearNotaApi(col, grade) {
+        if (col?.gradesReleased === false) return '';
+        const dg = grade?.displayGrade;
+        const rawScore =
+            typeof grade?.effectiveScore === 'number' && Number.isFinite(grade.effectiveScore)
+                ? grade.effectiveScore
+                : typeof grade?.score === 'number' && Number.isFinite(grade.score)
+                  ? grade.score
+                  : typeof dg?.score === 'number' && Number.isFinite(dg.score)
+                    ? dg.score
+                    : null;
+        const possible =
+            typeof col?.score?.possible === 'number' && col.score.possible > 0
+                ? col.score.possible
+                : typeof col?.possible === 'number' && col.possible > 0
+                  ? col.possible
+                  : typeof dg?.possible === 'number' && dg.possible > 0
+                    ? dg.possible
+                    : null;
+        const rawText = typeof dg?.grade === 'string' ? texto(dg.grade) : '';
+        const textGrade = rawText && rawText !== '-' ? rawText : '';
+        const fmtNum = n => (Number.isInteger(n) ? String(n) : String(Number(n.toFixed(1))));
+
+        if (rawScore !== null) {
+            if (possible && rawScore <= possible) return `${fmtNum(rawScore)}/${fmtNum(possible)}`;
+            return textGrade || fmtNum(rawScore);
+        }
+        return textGrade;
+    }
+
+    function clasificarEvaluacionApi({
+        col = null,
+        grade = null,
+        attempts = null,
+        todoBucket = '',
+        domEstado = null,
+        now = Date.now()
+    } = {}) {
+        const dueIso = col?.grading?.due || col?.dueDate || grade?.column?.dueDate || grade?.dueDate || null;
+        const dueMs = dueIso && Number.isFinite(Date.parse(dueIso)) ? Date.parse(dueIso) : null;
+        const attemptsLeft =
+            typeof grade?.attemptsLeft === 'number' && Number.isFinite(grade.attemptsLeft)
+                ? grade.attemptsLeft
+                : null;
+        const res = (completada, estadoLabel, estadoTipo, nota = '') => ({
+            completada,
+            estadoLabel,
+            estadoTipo,
+            dueMs,
+            nota,
+            attemptsLeft
+        });
+
+        if (grade?.isExempt || grade?.exempt) {
+            return res(true, 'Eximida', 'completada');
+        }
+
+        const listaIntentos = Array.isArray(attempts)
+            ? attempts
+            : grade?.lastAttempt?.status
+              ? [grade.lastAttempt]
+              : [];
+        const drafts = listaIntentos.filter(esIntentoBorradorApi);
+        const handedIn = listaIntentos.filter(a => a?.status && !esIntentoBorradorApi(a));
+        const intentosVerificados = Array.isArray(attempts);
+
+        const nota = formatearNotaApi(col, grade);
+        const soloBorradorSinEnvio = intentosVerificados && drafts.length > 0 && handedIn.length === 0;
+        const sinIntentosVerificados = intentosVerificados && listaIntentos.length === 0;
+
+        if (nota && !soloBorradorSinEnvio) {
+            return res(true, `Calificada · ${nota}`, 'completada', nota);
+        }
+        if (!nota && col?.gradesReleased !== false && grade?.status === 'Graded' && handedIn.length > 0) {
+            return res(true, 'Calificada', 'completada');
+        }
+
+        if (handedIn.length > 0) {
+            return res(true, 'Entregada', 'entregada');
+        }
+        if (!intentosVerificados && !drafts.length) {
+            const st = String(grade?.status || grade?.submissionStatus || '');
+            if (/^(?:needs_?grading|submitted|completed)$/i.test(st)) {
+                return res(true, 'Entregada', 'entregada');
+            }
+        }
+
+        if (drafts.length > 0 || /^draft_saved/i.test(String(grade?.submissionStatus || ''))) {
+            const vencida = todoBucket === 'overdue' || (Number.isFinite(dueMs) && dueMs < now);
+            return res(
+                false,
+                vencida ? 'Vencida (borrador)' : 'Borrador',
+                vencida ? 'vencida' : 'iniciada'
+            );
+        }
+
+        if (domEstado?.completada && !sinIntentosVerificados) {
+            return res(true, 'Completada', 'completada');
+        }
+
+        if (domEstado?.estadoTipo === 'bloqueada') {
+            return res(false, 'Bloqueada', 'bloqueada');
+        }
+        if (todoBucket === 'overdue' || (Number.isFinite(dueMs) && dueMs < now)) {
+            return res(false, 'Vencida', 'vencida');
+        }
+        if (todoBucket === 'dueToday' || (Number.isFinite(dueMs) && dueMs - now <= 24 * 3600e3)) {
+            return res(false, 'Vence hoy', 'hoy');
+        }
+        if (Number.isFinite(dueMs) && dueMs - now <= 72 * 3600e3) {
+            return res(false, 'Próxima', 'proxima');
+        }
+        if (domEstado?.estadoTipo === 'iniciada') {
+            return res(false, 'Iniciado', 'iniciada');
+        }
+        return res(false, 'Sin iniciar', 'sin-iniciar');
+    }
+
+    async function obtenerUsuarioActualApi() {
+        if (usuarioActualId) return usuarioActualId;
+
+        const ctxId =
+            typeof window !== 'undefined' && typeof window.__initialContext?.user?.id === 'string'
+                ? window.__initialContext.user.id.trim()
+                : '';
+        if (ctxId) {
+            usuarioActualId = ctxId;
+            return ctxId;
+        }
+
+        for (const endpoint of ['/learn/api/public/v1/users/me', '/learn/api/v1/users/me']) {
+            const data = await fetchJsonApi(endpoint);
+            if (typeof data?.id === 'string' && data.id.trim()) {
+                usuarioActualId = data.id.trim();
+                return usuarioActualId;
+            }
+        }
+        return '';
+    }
+
+    async function sincronizarEvaluacionesCursoApi(courseId, forzar = false) {
+        if (!courseId) return null;
+
+        const cache = evaluacionesApiPorCurso;
+        if (!forzar && cache && cache.courseId === courseId && Date.now() - cache.consultadoEn < 60000) {
+            return cache;
+        }
+
+        const uid = await obtenerUsuarioActualApi();
+        const ahora = new Date();
+        const hasta = new Date(ahora.getTime() + 60 * 864e5);
+
+        const obtenerColumnas = async () => {
+            const rutas = [
+                `/learn/api/v1/courses/${courseId}/gradebook/columns?includeInvisible=false&limit=200`,
+                `/learn/api/public/v2/courses/${courseId}/gradebook/columns?limit=200`,
+                `/learn/api/public/v1/courses/${courseId}/gradebook/columns?limit=200`
+            ];
+            for (const ruta of rutas) {
+                const data = await fetchJsonApi(ruta);
+                if (Array.isArray(data?.results)) return data.results;
+            }
+            return null;
+        };
+
+        const [columnasRaw, gradesData, todoData] = await Promise.all([
+            obtenerColumnas(),
+            uid
+                ? fetchJsonApi(
+                      `/learn/api/v1/courses/${courseId}/gradebook/grades?limit=200&userId=${encodeURIComponent(uid)}&expand=lastAttempt,attemptsLeft,submissionStatus,hasAttemptOrGradeFeedback,column`
+                  )
+                : Promise.resolve(null),
+            fetchJsonApi(
+                `/learn/api/v1/calendars/todo/studentItems?since=${encodeURIComponent(ahora.toISOString())}&until=${encodeURIComponent(hasta.toISOString())}`
+            )
+        ]);
+
+        const todoPorColId = new Map();
+        const todoPorContentId = new Map();
+        const todosCurso = [];
+        const bucketsTodo = [
+            ['overdueItems', 'overdue'],
+            ['dueTodayItems', 'dueToday'],
+            ['futureDueItems', 'upcoming']
+        ];
+
+        if (todoData && typeof todoData === 'object') {
+            for (const [prop, bucket] of bucketsTodo) {
+                for (const item of Array.isArray(todoData[prop]) ? todoData[prop] : []) {
+                    const cId = item?.column?.courseId || item?.courseId || '';
+                    if (cId !== courseId) continue;
+                    const colId = typeof item?.column?.id === 'string' ? item.column.id : '';
+                    const contentId = typeof item?.column?.contentId === 'string' ? item.column.contentId : '';
+                    const titulo = texto(
+                        item?.title || item?.column?.effectiveColumnName || item?.column?.columnName || ''
+                    );
+                    if (!titulo || RE.encuestaOSondeo.test(titulo)) continue;
+                    const info = {
+                        bucket,
+                        dueDate: item?.dueDate || item?.column?.dueDate || null,
+                        title: titulo,
+                        contentId,
+                        columnId: colId
+                    };
+                    todosCurso.push(info);
+                    if (colId && !todoPorColId.has(colId)) todoPorColId.set(colId, info);
+                    if (contentId && !todoPorContentId.has(contentId)) todoPorContentId.set(contentId, info);
+                }
+            }
+        }
+
+        const gradesIniciales = Array.isArray(gradesData?.results) ? gradesData.results : null;
+
+        if (!columnasRaw && !gradesIniciales && !todosCurso.length) {
+            const vacio = {
+                courseId,
+                consultadoEn: Date.now(),
+                disponible: false,
+                porContentId: new Map(),
+                porTitulo: new Map(),
+                lista: []
+            };
+            evaluacionesApiPorCurso = vacio;
+            return vacio;
+        }
+
+        const columnasValidas = [];
+        const colIdsVistos = new Set();
+        const contentIdsVistos = new Set();
+
+        const registrarColumna = col => {
+            if (!esColumnaEvaluacionValidaApi(col)) return;
+            const colId = col.id || '';
+            if (colId && colIdsVistos.has(colId)) return;
+            if (colId) colIdsVistos.add(colId);
+            if (col.contentId) contentIdsVistos.add(col.contentId);
+            columnasValidas.push(col);
+        };
+
+        for (const col of columnasRaw || []) {
+            registrarColumna(col);
+        }
+
+        for (const g of gradesIniciales || []) {
+            if (g?.column) registrarColumna(g.column);
+        }
+
+        for (const t of todosCurso) {
+            if (t.columnId && colIdsVistos.has(t.columnId)) continue;
+            if (t.contentId && contentIdsVistos.has(t.contentId)) continue;
+            registrarColumna({
+                id: t.columnId || `todo:${t.contentId || canon(t.title)}`,
+                contentId: t.contentId || '',
+                columnName: t.title,
+                dueDate: t.dueDate
+            });
+        }
+
+        let listaGrades = gradesIniciales;
+        if (uid && columnasValidas.length && (!listaGrades || !listaGrades.length)) {
+            const extraidas = await ejecutarPool(
+                columnasValidas.filter(c => c.id && !String(c.id).startsWith('todo:')),
+                Math.min(4, columnasValidas.length),
+                async col => {
+                    const rutas = [
+                        `/learn/api/public/v2/courses/${courseId}/gradebook/columns/${col.id}/users/${encodeURIComponent(uid)}`,
+                        `/learn/api/public/v1/courses/${courseId}/gradebook/columns/${col.id}/users/${encodeURIComponent(uid)}`
+                    ];
+                    for (const ruta of rutas) {
+                        const data = await fetchJsonApi(ruta);
+                        const gObj = Array.isArray(data?.results) ? data.results[0] : data;
+                        if (gObj && typeof gObj === 'object' && (gObj.userId || gObj.columnId || gObj.status || gObj.displayGrade)) {
+                            return { ...gObj, columnId: gObj.columnId || col.id };
+                        }
+                    }
+                    return null;
+                }
+            );
+            const validas = extraidas.filter(Boolean);
+            if (validas.length) listaGrades = validas;
+        }
+
+        const porColumnaId = new Map();
+        for (const g of listaGrades || []) {
+            const colId = g?.columnId || g?.column?.id || '';
+            if (colId && !porColumnaId.has(colId)) {
+                porColumnaId.set(colId, g);
+            }
+        }
+
+        const registrosBase = columnasValidas.map(col => {
+            const colId = col.id || '';
+            const contentId = col.contentId || '';
+            const grade = porColumnaId.get(colId) || null;
+            const todo =
+                (colId && todoPorColId.get(colId)) ||
+                (contentId && todoPorContentId.get(contentId)) ||
+                null;
+            return {
+                col,
+                colId,
+                contentId,
+                grade,
+                todoBucket: todo?.bucket || '',
+                todo
+            };
+        });
+
+        const porVerificar = registrosBase.filter(reg => {
+            const { col, colId, grade, todoBucket } = reg;
+            if (!colId || String(colId).startsWith('todo:')) return false;
+            const ids = extraerIdsIntentoApi(grade);
+            const subSt = String(grade?.submissionStatus || '');
+            const st = String(grade?.status || '');
+            return Boolean(
+                ids.length > 1 ||
+                (ids.length === 1 && !grade?.lastAttempt?.status) ||
+                /^draft_saved|in_?progress$/i.test(subSt) ||
+                /^needs_?grading$/i.test(st) ||
+                (st === 'Graded' && !formatearNotaApi(col, grade)) ||
+                ((todoBucket === 'overdue' || todoBucket === 'dueToday') && (ids.length > 0 || Boolean(grade)))
+            );
+        });
+
+        const intentosPorCol = new Map();
+        if (porVerificar.length) {
+            const resultadosInt = await ejecutarPool(
+                porVerificar,
+                Math.min(4, porVerificar.length),
+                async reg => {
+                    const { colId, grade } = reg;
+                    const ids = extraerIdsIntentoApi(grade);
+                    let intentos = null;
+
+                    if (ids.length) {
+                        const lecturas = await Promise.all(
+                            ids.map(attId =>
+                                fetchJsonApi(`/learn/api/v1/courses/${courseId}/gradebook/attempts/${attId}`)
+                            )
+                        );
+                        const validos = lecturas.filter(a => a && typeof a === 'object');
+                        if (validos.length) intentos = validos;
+                    }
+
+                    if (!intentos && uid) {
+                        for (const ver of ['v2', 'v1']) {
+                            const data = await fetchJsonApi(
+                                `/learn/api/public/${ver}/courses/${courseId}/gradebook/columns/${colId}/attempts?userId=${encodeURIComponent(uid)}`
+                            );
+                            if (Array.isArray(data?.results)) {
+                                intentos = data.results;
+                                break;
+                            }
+                        }
+                    }
+
+                    return { colId, intentos };
+                }
+            );
+
+            for (const r of resultadosInt) {
+                if (r?.colId) intentosPorCol.set(r.colId, r.intentos ?? null);
+            }
+        }
+
+        const porContentId = new Map();
+        const porTitulo = new Map();
+        const lista = [];
+
+        for (const reg of registrosBase) {
+            const { col, colId, contentId, grade, todoBucket, todo } = reg;
+            const colMerged = !col.grading?.due && !col.dueDate && todo?.dueDate
+                ? { ...col, dueDate: todo.dueDate }
+                : col;
+            const attempts = intentosPorCol.has(colId) ? intentosPorCol.get(colId) : null;
+            const titulo = texto(
+                colMerged.effectiveColumnName || colMerged.columnName || colMerged.name || todo?.title || ''
+            );
+            if (!titulo) continue;
+
+            const clasificacion = clasificarEvaluacionApi({
+                col: colMerged,
+                grade,
+                attempts,
+                todoBucket
+            });
+
+            const entrada = {
+                columnId: colId,
+                contentId,
+                titulo,
+                col: colMerged,
+                grade,
+                attempts,
+                todoBucket,
+                dueMs: clasificacion.dueMs,
+                clasificacion
+            };
+
+            lista.push(entrada);
+            if (contentId && !porContentId.has(contentId)) {
+                porContentId.set(contentId, entrada);
+            }
+            const claveTitulo = canon(titulo);
+            if (claveTitulo && !porTitulo.has(claveTitulo)) {
+                porTitulo.set(claveTitulo, entrada);
+            }
+        }
+
+        const resultado = {
+            courseId,
+            consultadoEn: Date.now(),
+            disponible: true,
+            porContentId,
+            porTitulo,
+            lista
+        };
+        evaluacionesApiPorCurso = resultado;
+        return resultado;
+    }
+
     function estaTarjetaBloqueada(card, btn = null) {
         if (!card) return true;
         if (btn) {
@@ -2072,6 +2548,58 @@
         }
     }
 
+    function registrarRefrescadorEvaluaciones(fn) {
+        evaluacionesRefrescarCb = typeof fn === 'function' ? fn : null;
+    }
+
+    function extraerContentIdEvaluacion(fila, card = null) {
+        const directo =
+            card?.getAttribute?.('data-content-id') ||
+            fila?.getAttribute?.('data-content-id') ||
+            fila?.closest?.('[data-content-id]')?.getAttribute?.('data-content-id') ||
+            '';
+        if (directo) return directo;
+        const raiz = card || fila;
+        const link = raiz?.querySelector?.(
+            'a[href*="/assessment/"], a[href*="/assignment/"], button[href*="/assessment/"]'
+        );
+        const m = String(link?.getAttribute?.('href') || '').match(/\/(?:assessment|assignment)\/(_\d+_\d+)/i);
+        return m ? m[1] : '';
+    }
+
+    function formatearFechaRelativaEvaluacion(dueMs, completada, now = Date.now()) {
+        if (!Number.isFinite(dueMs)) return '';
+        const dt = new Date(dueMs);
+        const pad = n => String(n).padStart(2, '0');
+        const ddmm = `${pad(dt.getDate())}/${pad(dt.getMonth() + 1)}`;
+        const hhmm = `${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
+        if (completada) return `${ddmm} ${hhmm}`;
+
+        const diffMs = dueMs - now;
+        if (diffMs < 0) {
+            const hrs = Math.max(1, Math.floor(-diffMs / 3600e3));
+            return hrs >= 48 ? `Venció hace ${Math.floor(hrs / 24)}d` : `Venció hace ${hrs}h`;
+        }
+
+        const hoy = new Date(now);
+        const mismoDia =
+            dt.getFullYear() === hoy.getFullYear() &&
+            dt.getMonth() === hoy.getMonth() &&
+            dt.getDate() === hoy.getDate();
+        if (mismoDia) return `Vence hoy ${hhmm}`;
+
+        const manana = new Date(hoy);
+        manana.setDate(hoy.getDate() + 1);
+        const esManana =
+            dt.getFullYear() === manana.getFullYear() &&
+            dt.getMonth() === manana.getMonth() &&
+            dt.getDate() === manana.getDate();
+        if (esManana) return `Mañana ${hhmm}`;
+
+        const dias = Math.max(1, Math.ceil(diffMs / 864e5));
+        return `En ${dias}d · ${ddmm} ${hhmm}`;
+    }
+
     function actualizarNotificacionEvaluaciones(items = []) {
         if (ocupado || evaluacionesNotificacionCerrada || !enVistaOutlineCurso()) {
             removerPanelesEvaluacion();
@@ -2090,6 +2618,7 @@
             notif &&
             (
                 !notif.querySelector('.maximus-eval-notif-cuerpo') ||
+                !notif.querySelector('.maximus-eval-notif-refrescar') ||
                 notif.querySelector('.maximus-eval-notif-estado') ||
                 notif.querySelector('.maximus-eval-notif-grip')
             )
@@ -2114,6 +2643,7 @@
                         </div>
                     </div>
                     <div class="maximus-eval-notif-controles">
+                        <button class="maximus-eval-notif-refrescar" type="button" aria-label="Actualizar evaluaciones" title="Actualizar estado desde Blackboard">&#8635;</button>
                         <button class="maximus-eval-notif-min" type="button" aria-label="Minimizar" title="Minimizar">&minus;</button>
                         <button class="maximus-eval-notif-cerrar" type="button" aria-label="Cerrar notificación" title="Cerrar">&times;</button>
                     </div>
@@ -2142,6 +2672,13 @@
                 notif.addEventListener(evento, e => e.stopPropagation());
             }
 
+            const btnRefrescar = notif.querySelector('.maximus-eval-notif-refrescar');
+            btnRefrescar?.addEventListener('click', e => {
+                e.preventDefault();
+                e.stopPropagation();
+                evaluacionesRefrescarCb?.();
+            });
+
             const btnMin = notif.querySelector('.maximus-eval-notif-min');
             btnMin?.addEventListener('click', e => {
                 e.preventDefault();
@@ -2166,17 +2703,40 @@
 
         sincronizarEstadoMinNotif(notif);
 
+        const btnRefrescarAct = notif.querySelector('.maximus-eval-notif-refrescar');
         if (enAutomatizacion) {
             notif.classList.add('en-automatizacion');
+            btnRefrescarAct?.classList.add('girando');
         } else {
             notif.classList.remove('en-automatizacion');
+            btnRefrescarAct?.classList.remove('girando');
         }
 
         if (evaluacionesNotifPos) {
             aplicarPosicionNotif(notif, evaluacionesNotifPos);
         }
 
-        const pendientes = items.filter(it => !it.completada);
+        const ordenUrgencia = {
+            vencida: 0,
+            hoy: 1,
+            proxima: 2,
+            iniciada: 3,
+            'sin-iniciar': 4,
+            bloqueada: 5
+        };
+        const pendientes = items
+            .filter(it => !it.completada)
+            .map((it, orden) => ({ it, orden }))
+            .sort((a, b) => {
+                const ua = ordenUrgencia[a.it.estadoTipo] ?? 9;
+                const ub = ordenUrgencia[b.it.estadoTipo] ?? 9;
+                if (ua !== ub) return ua - ub;
+                const da = Number.isFinite(a.it.dueMs) ? a.it.dueMs : Infinity;
+                const db = Number.isFinite(b.it.dueMs) ? b.it.dueMs : Infinity;
+                if (da !== db) return da - db;
+                return a.orden - b.orden;
+            })
+            .map(x => x.it);
         const completadas = items.filter(it => it.completada);
 
         const resumenEl = notif.querySelector('.maximus-eval-notif-resumen');
@@ -2190,7 +2750,7 @@
             }
         }
 
-        const firma = `${enAutomatizacion ? 1 : 0}::${items.map(it => `${it.id}:${it.estadoTipo || ''}:${it.titulo}:${it.unidad || ''}:${it.detalles || ''}`).join('||')}`;
+        const firma = `${enAutomatizacion ? 1 : 0}::${items.map(it => `${it.id}:${it.estadoTipo || ''}:${it.estadoLabel || ''}:${it.soloApi ? 1 : 0}:${it.titulo}:${it.unidad || ''}:${it.detalles || ''}`).join('||')}`;
         if (notif.dataset.maximusFirma === firma) {
             return;
         }
@@ -2236,11 +2796,22 @@
 
                 const enlace = document.createElement('a');
                 enlace.className = 'maximus-eval-notif-link';
-                enlace.setAttribute('href', `#${item.id}`);
+                enlace.setAttribute('href', item.soloApi && item.urlDirecta ? item.urlDirecta : `#${item.id}`);
                 enlace.textContent = item.titulo;
                 enlace.addEventListener('click', e => {
                     e.preventDefault();
                     e.stopPropagation();
+                    if (item.soloApi) {
+                        const enDom =
+                            (item.contentId && document.querySelector(`[data-content-id="${item.contentId}"]`)) ||
+                            document.querySelector(`[data-maximus-eval-id="${item.id}"]`);
+                        if (enDom) {
+                            irAEvaluacionHash(item.id);
+                        } else if (item.urlDirecta) {
+                            location.href = item.urlDirecta;
+                        }
+                        return;
+                    }
                     irAEvaluacionHash(item.id);
                 });
 
@@ -2250,6 +2821,12 @@
                     check.setAttribute('aria-hidden', 'true');
                     check.textContent = '✓';
                     topRow.append(num, check, enlace);
+                    if (item.estadoLabel && item.estadoLabel !== 'Completada') {
+                        const tag = document.createElement('span');
+                        tag.className = `maximus-eval-notif-tag maximus-eval-notif-tag-${item.estadoTipo || 'completada'}`;
+                        tag.textContent = item.estadoLabel;
+                        topRow.append(tag);
+                    }
                 } else {
                     topRow.append(num, enlace);
                     if (item.estadoLabel) {
@@ -2325,11 +2902,64 @@
             }
         }
 
+        const cidCurso = obtenerIdCursoActual();
+        const apiCurso =
+            evaluacionesApiPorCurso?.courseId === cidCurso &&
+            evaluacionesApiPorCurso?.disponible
+                ? evaluacionesApiPorCurso
+                : null;
+        const columnasUsadas = new Set();
+
         const idsUsados = new Set();
         const items = registros.map(({ fila, card }, idx) => {
             const titulo = obtenerTituloEvaluacion(fila, card);
-            const { completada, estadoLabel, estadoTipo } = obtenerEstadoEvaluacion(fila, card);
-            const { unidad, detalles } = obtenerMetaEvaluacion(fila, card);
+            const domEstado = obtenerEstadoEvaluacion(fila, card);
+            const contentId = extraerContentIdEvaluacion(fila, card);
+            const apiEntry =
+                (contentId && apiCurso?.porContentId?.get(contentId)) ||
+                apiCurso?.porTitulo?.get(canon(titulo)) ||
+                null;
+
+            let completada = domEstado.completada;
+            let estadoLabel = domEstado.estadoLabel;
+            let estadoTipo = domEstado.estadoTipo;
+            let dueMs = null;
+            let attemptsLeft = null;
+
+            if (apiEntry) {
+                if (apiEntry.columnId) columnasUsadas.add(apiEntry.columnId);
+                const clasif = clasificarEvaluacionApi({
+                    col: apiEntry.col,
+                    grade: apiEntry.grade,
+                    attempts: apiEntry.attempts,
+                    todoBucket: apiEntry.todoBucket,
+                    domEstado
+                });
+                completada = clasif.completada;
+                estadoLabel = clasif.estadoLabel;
+                estadoTipo = clasif.estadoTipo;
+                dueMs = clasif.dueMs;
+                attemptsLeft = clasif.attemptsLeft;
+            }
+
+            const { unidad, detalles: detallesDom } = obtenerMetaEvaluacion(fila, card);
+            const partesDetalles = [];
+            if (detallesDom) partesDetalles.push(detallesDom);
+            if (Number.isFinite(dueMs)) {
+                const rel = formatearFechaRelativaEvaluacion(dueMs, completada);
+                const yaTieneMismaFecha =
+                    detallesDom &&
+                    !/sin\s+fecha\s+de\s+entrega/i.test(detallesDom) &&
+                    /fecha\s+de\s+entrega|due|vence/i.test(detallesDom) &&
+                    /^\d{2}\/\d{2}\s+\d{2}:\d{2}$/.test(rel);
+                if (rel && !yaTieneMismaFecha) partesDetalles.push(rel);
+            }
+            if (attemptsLeft !== null && !completada) {
+                partesDetalles.push(
+                    `${attemptsLeft} ${attemptsLeft === 1 ? 'intento rest.' : 'intentos rest.'}`
+                );
+            }
+
             const hashId = generarHashIdEvaluacion(titulo, idx, idsUsados);
             fila.dataset.maximusEvalId = hashId;
             if (!fila.id || fila.id.startsWith('maximus-eval-')) {
@@ -2341,12 +2971,54 @@
                 completada,
                 estadoLabel,
                 estadoTipo,
+                dueMs,
                 unidad,
-                detalles,
+                detalles: partesDetalles.join(' · '),
                 fila,
                 card
             };
         });
+
+        for (const apiEntry of apiCurso?.lista || []) {
+            if (!apiEntry || (apiEntry.columnId && columnasUsadas.has(apiEntry.columnId))) continue;
+            const clasif =
+                apiEntry.clasificacion ||
+                clasificarEvaluacionApi({
+                    col: apiEntry.col,
+                    grade: apiEntry.grade,
+                    attempts: apiEntry.attempts,
+                    todoBucket: apiEntry.todoBucket
+                });
+            const hashId = generarHashIdEvaluacion(apiEntry.titulo, items.length, idsUsados);
+            const rel = Number.isFinite(clasif.dueMs)
+                ? formatearFechaRelativaEvaluacion(clasif.dueMs, clasif.completada)
+                : '';
+            const partes = [];
+            if (rel) partes.push(rel);
+            if (clasif.attemptsLeft !== null && !clasif.completada) {
+                partes.push(
+                    `${clasif.attemptsLeft} ${clasif.attemptsLeft === 1 ? 'intento rest.' : 'intentos rest.'}`
+                );
+            }
+            partes.push('En módulo colapsado');
+            items.push({
+                id: hashId,
+                titulo: apiEntry.titulo,
+                completada: clasif.completada,
+                estadoLabel: clasif.estadoLabel,
+                estadoTipo: clasif.estadoTipo,
+                dueMs: clasif.dueMs,
+                soloApi: true,
+                contentId: apiEntry.contentId || '',
+                urlDirecta: apiEntry.contentId
+                    ? `/ultra/courses/${cidCurso}/assessment/${apiEntry.contentId}/overview?courseId=${cidCurso}`
+                    : '',
+                unidad: '',
+                detalles: partes.join(' · '),
+                fila: null,
+                card: null
+            });
+        }
 
         actualizarNotificacionEvaluaciones(items);
         return items;
@@ -2360,6 +3032,7 @@
             evaluacionesModulosSinEval.clear();
             evaluacionesCarpetasConEval.clear();
             evaluacionesCacheApi.clear();
+            evaluacionesApiPorCurso = null;
             evaluacionesBotonesAutoAbiertos = new WeakSet();
             evaluacionesNotificacionCerrada = false;
             evaluacionesAutomatizacionActiva = false;
@@ -2382,7 +3055,7 @@
         );
     }
 
-    async function desplegarEvaluacionesAutomaticamente(alActualizar = null) {
+    async function desplegarEvaluacionesAutomaticamente(alActualizar = null, forzarApi = false) {
         reiniciarEstadoEvaluacionesSiCambioCurso();
 
         if (!enVistaOutlineCurso() || ocupado) {
@@ -2498,6 +3171,13 @@
         };
 
         try {
+            const promesaApiCurso = sincronizarEvaluacionesCursoApi(courseIdInicial, forzarApi)
+                .then(res => {
+                    if (res?.disponible && !debeAbortar()) alActualizar?.();
+                    return res;
+                })
+                .catch(() => null);
+
             await expandirCarpetasEvaluacionVisibles();
             if (debeAbortar()) return;
             alActualizar?.();
@@ -2612,6 +3292,7 @@
                 }
             }
 
+            await promesaApiCurso;
             if (!debeAbortar()) {
                 await expandirCarpetasEvaluacionVisibles();
                 if (!debeAbortar()) alActualizar?.();
@@ -2634,7 +3315,7 @@
                     evaluacionesTimerBackdrop = null;
                 }
                 setTimeout(() => {
-                    desplegarEvaluacionesAutomaticamente(alActualizar);
+                    desplegarEvaluacionesAutomaticamente(alActualizar, forzarApi);
                 }, 350);
             } else if (courseIdInicial !== obtenerIdCursoActual()) {
                 if (evaluacionesTimerBackdrop) {
@@ -2686,7 +3367,14 @@
                 if (!e.isTrusted) return;
                 const target = e.target;
                 if (!target?.closest) return;
-                if (target.closest(`[data-maximus], ${selectorIgnorarBtn}`)) return;
+                if (target.closest('[data-maximus]')) return;
+                if (target.closest('.js-review-state-icon-button')) {
+                    setTimeout(() => {
+                        if (!ocupado) marcarEvaluaciones();
+                    }, 350);
+                    return;
+                }
+                if (target.closest(selectorIgnorarBtn)) return;
 
                 const card = target.closest(TARJETAS);
                 if (!card) return;
@@ -3397,6 +4085,7 @@
                 flex: 0 0 auto !important;
             }
 
+            .maximus-eval-notif-refrescar,
             .maximus-eval-notif-min,
             .maximus-eval-notif-cerrar {
                 width: 22px !important;
@@ -3415,6 +4104,8 @@
                 transition: background-color .15s, border-color .15s, color .15s !important;
             }
 
+            .maximus-eval-notif-refrescar:hover,
+            .maximus-eval-notif-refrescar:focus-visible,
             .maximus-eval-notif-min:hover,
             .maximus-eval-notif-min:focus-visible,
             .maximus-eval-notif-cerrar:hover,
@@ -3422,6 +4113,10 @@
                 background: rgba(229, 184, 46, 0.25) !important;
                 border-color: #e6c95c !important;
                 color: #26394b !important;
+            }
+
+            .maximus-eval-notif-refrescar.girando {
+                animation: maximus-giro .85s linear infinite !important;
             }
 
             .maximus-eval-notif-cuerpo {
@@ -3529,6 +4224,31 @@
             .maximus-eval-notif-tag-bloqueada {
                 background: rgba(100, 116, 139, 0.16) !important;
                 color: #475569 !important;
+            }
+
+            .maximus-eval-notif-tag-vencida {
+                background: rgba(220, 38, 38, 0.16) !important;
+                color: #991b1b !important;
+            }
+
+            .maximus-eval-notif-tag-hoy {
+                background: rgba(234, 88, 12, 0.18) !important;
+                color: #9a3412 !important;
+            }
+
+            .maximus-eval-notif-tag-proxima {
+                background: rgba(217, 119, 6, 0.18) !important;
+                color: #92400e !important;
+            }
+
+            .maximus-eval-notif-tag-entregada {
+                background: rgba(13, 148, 136, 0.16) !important;
+                color: #115e59 !important;
+            }
+
+            .maximus-eval-notif-tag-completada {
+                background: rgba(26, 127, 55, 0.15) !important;
+                color: #116329 !important;
             }
 
             .maximus-eval-notif-meta {
@@ -6243,6 +6963,7 @@
 
         document.querySelectorAll('.maximus-panel').forEach(p => p.remove());
         removerPanelesEvaluacion();
+        evaluacionesApiPorCurso = null;
         evaluacionesNotificacionCerrada = false;
         evaluacionesAutomatizacionActiva = false;
         evaluacionesAnalisisCompleto = false;
@@ -6254,6 +6975,13 @@
         }
 
         registrarControlColapsoEvaluaciones();
+        registrarRefrescadorEvaluaciones(() => {
+            evaluacionesApiPorCurso = null;
+            evaluacionesCacheApi.clear();
+            evaluacionesModulosSinEval.clear();
+            evaluacionesAnalisisCompleto = false;
+            desplegarEvaluacionesAutomaticamente(marcarEvaluaciones, true);
+        });
         activarInterceptorIframes();
         css();
         descubrir();

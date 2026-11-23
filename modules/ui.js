@@ -1,7 +1,8 @@
 // Estilos CSS, barra de progreso por bloques, colores de estado en filas, notificación flotante de evaluaciones y botonera sin logos.
 
 import { TARJETAS, estado } from './config.js';
-import { texto, tituloEl } from './utils.js';
+import { texto, canon, tituloEl, obtenerIdCursoActual } from './utils.js';
+import { clasificarEvaluacionApi } from './api.js';
 import {
     esTarjetaEvaluacion,
     esElementoEvaluacionEnNodo,
@@ -419,6 +420,7 @@ export function inyectarCss() {
             flex: 0 0 auto !important;
         }
 
+        .maximus-eval-notif-refrescar,
         .maximus-eval-notif-min,
         .maximus-eval-notif-cerrar {
             width: 22px !important;
@@ -437,6 +439,8 @@ export function inyectarCss() {
             transition: background-color .15s, border-color .15s, color .15s !important;
         }
 
+        .maximus-eval-notif-refrescar:hover,
+        .maximus-eval-notif-refrescar:focus-visible,
         .maximus-eval-notif-min:hover,
         .maximus-eval-notif-min:focus-visible,
         .maximus-eval-notif-cerrar:hover,
@@ -444,6 +448,10 @@ export function inyectarCss() {
             background: rgba(229, 184, 46, 0.25) !important;
             border-color: #e6c95c !important;
             color: #26394b !important;
+        }
+
+        .maximus-eval-notif-refrescar.girando {
+            animation: maximus-giro .85s linear infinite !important;
         }
 
         .maximus-eval-notif-cuerpo {
@@ -551,6 +559,31 @@ export function inyectarCss() {
         .maximus-eval-notif-tag-bloqueada {
             background: rgba(100, 116, 139, 0.16) !important;
             color: #475569 !important;
+        }
+
+        .maximus-eval-notif-tag-vencida {
+            background: rgba(220, 38, 38, 0.16) !important;
+            color: #991b1b !important;
+        }
+
+        .maximus-eval-notif-tag-hoy {
+            background: rgba(234, 88, 12, 0.18) !important;
+            color: #9a3412 !important;
+        }
+
+        .maximus-eval-notif-tag-proxima {
+            background: rgba(217, 119, 6, 0.18) !important;
+            color: #92400e !important;
+        }
+
+        .maximus-eval-notif-tag-entregada {
+            background: rgba(13, 148, 136, 0.16) !important;
+            color: #115e59 !important;
+        }
+
+        .maximus-eval-notif-tag-completada {
+            background: rgba(26, 127, 55, 0.15) !important;
+            color: #116329 !important;
         }
 
         .maximus-eval-notif-meta {
@@ -1199,6 +1232,58 @@ function sincronizarEstadoMinNotif(elNotif) {
     }
 }
 
+export function registrarRefrescadorEvaluaciones(fn) {
+    estado.evaluacionesRefrescarCb = typeof fn === 'function' ? fn : null;
+}
+
+function extraerContentIdEvaluacion(fila, card = null) {
+    const directo =
+        card?.getAttribute?.('data-content-id') ||
+        fila?.getAttribute?.('data-content-id') ||
+        fila?.closest?.('[data-content-id]')?.getAttribute?.('data-content-id') ||
+        '';
+    if (directo) return directo;
+    const raiz = card || fila;
+    const link = raiz?.querySelector?.(
+        'a[href*="/assessment/"], a[href*="/assignment/"], button[href*="/assessment/"]'
+    );
+    const m = String(link?.getAttribute?.('href') || '').match(/\/(?:assessment|assignment)\/(_\d+_\d+)/i);
+    return m ? m[1] : '';
+}
+
+function formatearFechaRelativaEvaluacion(dueMs, completada, now = Date.now()) {
+    if (!Number.isFinite(dueMs)) return '';
+    const dt = new Date(dueMs);
+    const pad = n => String(n).padStart(2, '0');
+    const ddmm = `${pad(dt.getDate())}/${pad(dt.getMonth() + 1)}`;
+    const hhmm = `${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
+    if (completada) return `${ddmm} ${hhmm}`;
+
+    const diffMs = dueMs - now;
+    if (diffMs < 0) {
+        const hrs = Math.max(1, Math.floor(-diffMs / 3600e3));
+        return hrs >= 48 ? `Venció hace ${Math.floor(hrs / 24)}d` : `Venció hace ${hrs}h`;
+    }
+
+    const hoy = new Date(now);
+    const mismoDia =
+        dt.getFullYear() === hoy.getFullYear() &&
+        dt.getMonth() === hoy.getMonth() &&
+        dt.getDate() === hoy.getDate();
+    if (mismoDia) return `Vence hoy ${hhmm}`;
+
+    const manana = new Date(hoy);
+    manana.setDate(hoy.getDate() + 1);
+    const esManana =
+        dt.getFullYear() === manana.getFullYear() &&
+        dt.getMonth() === manana.getMonth() &&
+        dt.getDate() === manana.getDate();
+    if (esManana) return `Mañana ${hhmm}`;
+
+    const dias = Math.max(1, Math.ceil(diffMs / 864e5));
+    return `En ${dias}d · ${ddmm} ${hhmm}`;
+}
+
 export function actualizarNotificacionEvaluaciones(items = []) {
     if (estado.ocupado || estado.evaluacionesNotificacionCerrada || !enVistaOutlineCurso()) {
         removerPanelesEvaluacion();
@@ -1217,6 +1302,7 @@ export function actualizarNotificacionEvaluaciones(items = []) {
         notif &&
         (
             !notif.querySelector('.maximus-eval-notif-cuerpo') ||
+            !notif.querySelector('.maximus-eval-notif-refrescar') ||
             notif.querySelector('.maximus-eval-notif-estado') ||
             notif.querySelector('.maximus-eval-notif-grip')
         )
@@ -1241,6 +1327,7 @@ export function actualizarNotificacionEvaluaciones(items = []) {
                     </div>
                 </div>
                 <div class="maximus-eval-notif-controles">
+                    <button class="maximus-eval-notif-refrescar" type="button" aria-label="Actualizar evaluaciones" title="Actualizar estado desde Blackboard">&#8635;</button>
                     <button class="maximus-eval-notif-min" type="button" aria-label="Minimizar" title="Minimizar">&minus;</button>
                     <button class="maximus-eval-notif-cerrar" type="button" aria-label="Cerrar notificación" title="Cerrar">&times;</button>
                 </div>
@@ -1269,6 +1356,13 @@ export function actualizarNotificacionEvaluaciones(items = []) {
             notif.addEventListener(evento, e => e.stopPropagation());
         }
 
+        const btnRefrescar = notif.querySelector('.maximus-eval-notif-refrescar');
+        btnRefrescar?.addEventListener('click', e => {
+            e.preventDefault();
+            e.stopPropagation();
+            estado.evaluacionesRefrescarCb?.();
+        });
+
         const btnMin = notif.querySelector('.maximus-eval-notif-min');
         btnMin?.addEventListener('click', e => {
             e.preventDefault();
@@ -1293,17 +1387,40 @@ export function actualizarNotificacionEvaluaciones(items = []) {
 
     sincronizarEstadoMinNotif(notif);
 
+    const btnRefrescarAct = notif.querySelector('.maximus-eval-notif-refrescar');
     if (enAutomatizacion) {
         notif.classList.add('en-automatizacion');
+        btnRefrescarAct?.classList.add('girando');
     } else {
         notif.classList.remove('en-automatizacion');
+        btnRefrescarAct?.classList.remove('girando');
     }
 
     if (estado.evaluacionesNotifPos) {
         aplicarPosicionNotif(notif, estado.evaluacionesNotifPos);
     }
 
-    const pendientes = items.filter(it => !it.completada);
+    const ordenUrgencia = {
+        vencida: 0,
+        hoy: 1,
+        proxima: 2,
+        iniciada: 3,
+        'sin-iniciar': 4,
+        bloqueada: 5
+    };
+    const pendientes = items
+        .filter(it => !it.completada)
+        .map((it, orden) => ({ it, orden }))
+        .sort((a, b) => {
+            const ua = ordenUrgencia[a.it.estadoTipo] ?? 9;
+            const ub = ordenUrgencia[b.it.estadoTipo] ?? 9;
+            if (ua !== ub) return ua - ub;
+            const da = Number.isFinite(a.it.dueMs) ? a.it.dueMs : Infinity;
+            const db = Number.isFinite(b.it.dueMs) ? b.it.dueMs : Infinity;
+            if (da !== db) return da - db;
+            return a.orden - b.orden;
+        })
+        .map(x => x.it);
     const completadas = items.filter(it => it.completada);
 
     const resumenEl = notif.querySelector('.maximus-eval-notif-resumen');
@@ -1317,7 +1434,7 @@ export function actualizarNotificacionEvaluaciones(items = []) {
         }
     }
 
-    const firma = `${enAutomatizacion ? 1 : 0}::${items.map(it => `${it.id}:${it.estadoTipo || ''}:${it.titulo}:${it.unidad || ''}:${it.detalles || ''}`).join('||')}`;
+    const firma = `${enAutomatizacion ? 1 : 0}::${items.map(it => `${it.id}:${it.estadoTipo || ''}:${it.estadoLabel || ''}:${it.soloApi ? 1 : 0}:${it.titulo}:${it.unidad || ''}:${it.detalles || ''}`).join('||')}`;
     if (notif.dataset.maximusFirma === firma) {
         return;
     }
@@ -1363,11 +1480,22 @@ export function actualizarNotificacionEvaluaciones(items = []) {
 
             const enlace = document.createElement('a');
             enlace.className = 'maximus-eval-notif-link';
-            enlace.setAttribute('href', `#${item.id}`);
+            enlace.setAttribute('href', item.soloApi && item.urlDirecta ? item.urlDirecta : `#${item.id}`);
             enlace.textContent = item.titulo;
             enlace.addEventListener('click', e => {
                 e.preventDefault();
                 e.stopPropagation();
+                if (item.soloApi) {
+                    const enDom =
+                        (item.contentId && document.querySelector(`[data-content-id="${item.contentId}"]`)) ||
+                        document.querySelector(`[data-maximus-eval-id="${item.id}"]`);
+                    if (enDom) {
+                        irAEvaluacionHash(item.id);
+                    } else if (item.urlDirecta) {
+                        location.href = item.urlDirecta;
+                    }
+                    return;
+                }
                 irAEvaluacionHash(item.id);
             });
 
@@ -1377,6 +1505,12 @@ export function actualizarNotificacionEvaluaciones(items = []) {
                 check.setAttribute('aria-hidden', 'true');
                 check.textContent = '✓';
                 topRow.append(num, check, enlace);
+                if (item.estadoLabel && item.estadoLabel !== 'Completada') {
+                    const tag = document.createElement('span');
+                    tag.className = `maximus-eval-notif-tag maximus-eval-notif-tag-${item.estadoTipo || 'completada'}`;
+                    tag.textContent = item.estadoLabel;
+                    topRow.append(tag);
+                }
             } else {
                 topRow.append(num, enlace);
                 if (item.estadoLabel) {
@@ -1452,11 +1586,64 @@ export function marcarEvaluaciones() {
         }
     }
 
+    const cidCurso = obtenerIdCursoActual();
+    const apiCurso =
+        estado.evaluacionesApiPorCurso?.courseId === cidCurso &&
+        estado.evaluacionesApiPorCurso?.disponible
+            ? estado.evaluacionesApiPorCurso
+            : null;
+    const columnasUsadas = new Set();
+
     const idsUsados = new Set();
     const items = registros.map(({ fila, card }, idx) => {
         const titulo = obtenerTituloEvaluacion(fila, card);
-        const { completada, estadoLabel, estadoTipo } = obtenerEstadoEvaluacion(fila, card);
-        const { unidad, detalles } = obtenerMetaEvaluacion(fila, card);
+        const domEstado = obtenerEstadoEvaluacion(fila, card);
+        const contentId = extraerContentIdEvaluacion(fila, card);
+        const apiEntry =
+            (contentId && apiCurso?.porContentId?.get(contentId)) ||
+            apiCurso?.porTitulo?.get(canon(titulo)) ||
+            null;
+
+        let completada = domEstado.completada;
+        let estadoLabel = domEstado.estadoLabel;
+        let estadoTipo = domEstado.estadoTipo;
+        let dueMs = null;
+        let attemptsLeft = null;
+
+        if (apiEntry) {
+            if (apiEntry.columnId) columnasUsadas.add(apiEntry.columnId);
+            const clasif = clasificarEvaluacionApi({
+                col: apiEntry.col,
+                grade: apiEntry.grade,
+                attempts: apiEntry.attempts,
+                todoBucket: apiEntry.todoBucket,
+                domEstado
+            });
+            completada = clasif.completada;
+            estadoLabel = clasif.estadoLabel;
+            estadoTipo = clasif.estadoTipo;
+            dueMs = clasif.dueMs;
+            attemptsLeft = clasif.attemptsLeft;
+        }
+
+        const { unidad, detalles: detallesDom } = obtenerMetaEvaluacion(fila, card);
+        const partesDetalles = [];
+        if (detallesDom) partesDetalles.push(detallesDom);
+        if (Number.isFinite(dueMs)) {
+            const rel = formatearFechaRelativaEvaluacion(dueMs, completada);
+            const yaTieneMismaFecha =
+                detallesDom &&
+                !/sin\s+fecha\s+de\s+entrega/i.test(detallesDom) &&
+                /fecha\s+de\s+entrega|due|vence/i.test(detallesDom) &&
+                /^\d{2}\/\d{2}\s+\d{2}:\d{2}$/.test(rel);
+            if (rel && !yaTieneMismaFecha) partesDetalles.push(rel);
+        }
+        if (attemptsLeft !== null && !completada) {
+            partesDetalles.push(
+                `${attemptsLeft} ${attemptsLeft === 1 ? 'intento rest.' : 'intentos rest.'}`
+            );
+        }
+
         const hashId = generarHashIdEvaluacion(titulo, idx, idsUsados);
         fila.dataset.maximusEvalId = hashId;
         if (!fila.id || fila.id.startsWith('maximus-eval-')) {
@@ -1468,12 +1655,54 @@ export function marcarEvaluaciones() {
             completada,
             estadoLabel,
             estadoTipo,
+            dueMs,
             unidad,
-            detalles,
+            detalles: partesDetalles.join(' · '),
             fila,
             card
         };
     });
+
+    for (const apiEntry of apiCurso?.lista || []) {
+        if (!apiEntry || (apiEntry.columnId && columnasUsadas.has(apiEntry.columnId))) continue;
+        const clasif =
+            apiEntry.clasificacion ||
+            clasificarEvaluacionApi({
+                col: apiEntry.col,
+                grade: apiEntry.grade,
+                attempts: apiEntry.attempts,
+                todoBucket: apiEntry.todoBucket
+            });
+        const hashId = generarHashIdEvaluacion(apiEntry.titulo, items.length, idsUsados);
+        const rel = Number.isFinite(clasif.dueMs)
+            ? formatearFechaRelativaEvaluacion(clasif.dueMs, clasif.completada)
+            : '';
+        const partes = [];
+        if (rel) partes.push(rel);
+        if (clasif.attemptsLeft !== null && !clasif.completada) {
+            partes.push(
+                `${clasif.attemptsLeft} ${clasif.attemptsLeft === 1 ? 'intento rest.' : 'intentos rest.'}`
+            );
+        }
+        partes.push('En módulo colapsado');
+        items.push({
+            id: hashId,
+            titulo: apiEntry.titulo,
+            completada: clasif.completada,
+            estadoLabel: clasif.estadoLabel,
+            estadoTipo: clasif.estadoTipo,
+            dueMs: clasif.dueMs,
+            soloApi: true,
+            contentId: apiEntry.contentId || '',
+            urlDirecta: apiEntry.contentId
+                ? `/ultra/courses/${cidCurso}/assessment/${apiEntry.contentId}/overview?courseId=${cidCurso}`
+                : '',
+            unidad: '',
+            detalles: partes.join(' · '),
+            fila: null,
+            card: null
+        });
+    }
 
     actualizarNotificacionEvaluaciones(items);
     return items;

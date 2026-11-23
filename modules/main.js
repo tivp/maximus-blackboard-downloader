@@ -27,7 +27,8 @@ import {
     pieza,
     restaurarColoresFilas,
     limpiarPanelesEnVistaDocumento,
-    marcarEvaluaciones
+    marcarEvaluaciones,
+    registrarRefrescadorEvaluaciones
 } from './ui.js';
 import {
     ejecutar,
@@ -410,7 +411,14 @@ export function registrarControlColapsoEvaluaciones() {
         if (!e.isTrusted) return;
         const target = e.target;
         if (!target?.closest) return;
-        if (target.closest(`[data-maximus], ${selectorIgnorarBtn}`)) return;
+        if (target.closest('[data-maximus]')) return;
+        if (target.closest('.js-review-state-icon-button')) {
+            setTimeout(() => {
+                if (!estado.ocupado) marcarEvaluaciones();
+            }, 350);
+            return;
+        }
+        if (target.closest(selectorIgnorarBtn)) return;
 
         const card = target.closest(TARJETAS);
         if (!card) return;
@@ -501,6 +509,7 @@ export function iniciar() {
     estado.evaluacionesModulosSinEval.clear();
     estado.evaluacionesCarpetasConEval.clear();
     estado.evaluacionesCacheApi.clear();
+    estado.evaluacionesApiPorCurso = null;
     estado.evaluacionesBotonesAutoAbiertos = new WeakSet();
     estado.evaluacionesNotificacionCerrada = false;
     estado.evaluacionesAutomatizacionActiva = false;
@@ -518,6 +527,13 @@ export function iniciar() {
     registrarRehidratador(rehidratarDomCurso);
     registrarAgendador(agendar);
     registrarControlColapsoEvaluaciones();
+    registrarRefrescadorEvaluaciones(() => {
+        estado.evaluacionesApiPorCurso = null;
+        estado.evaluacionesCacheApi.clear();
+        estado.evaluacionesModulosSinEval.clear();
+        estado.evaluacionesAnalisisCompleto = false;
+        desplegarEvaluacionesAutomaticamente(marcarEvaluaciones, true);
+    });
 
     activarInterceptorIframes();
     inyectarCss();

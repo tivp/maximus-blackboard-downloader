@@ -59,7 +59,10 @@ export const estado = {
     evaluacionesAnalisisCompleto: false,
     evaluacionesTimerBackdrop: null,
     evaluacionesNotifPos: null,
-    evaluacionesNotifMinimizada: false
+    evaluacionesNotifMinimizada: false,
+    usuarioActualId: '',
+    evaluacionesApiPorCurso: null,
+    evaluacionesRefrescarCb: null
 };
 
 // Sincroniza el atributo en <html> para que page-hook.js sepa cuándo hay una descarga en curso.

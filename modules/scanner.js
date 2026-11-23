@@ -16,7 +16,7 @@ import {
     tituloEl
 } from './utils.js';
 import { enVistaDocumentoPantallaCompleta } from './interceptor.js';
-import { inspeccionarEvaluacionesEnContenedorApi } from './api.js';
+import { inspeccionarEvaluacionesEnContenedorApi, sincronizarEvaluacionesCursoApi } from './api.js';
 
 // Saca los bloques de archivo (videos, PDFs, enlaces de Ally) que vienen dentro de un document-panel de Blackboard Ultra.
 export function extraerBloquesDeDocumentPanel(raizDoc = document) {
@@ -1055,6 +1055,7 @@ export function reiniciarEstadoEvaluacionesSiCambioCurso() {
         estado.evaluacionesModulosSinEval.clear();
         estado.evaluacionesCarpetasConEval.clear();
         estado.evaluacionesCacheApi.clear();
+        estado.evaluacionesApiPorCurso = null;
         estado.evaluacionesBotonesAutoAbiertos = new WeakSet();
         estado.evaluacionesNotificacionCerrada = false;
         estado.evaluacionesAutomatizacionActiva = false;
@@ -1077,7 +1078,7 @@ export function enVistaOutlineCurso() {
     );
 }
 
-export async function desplegarEvaluacionesAutomaticamente(alActualizar = null) {
+export async function desplegarEvaluacionesAutomaticamente(alActualizar = null, forzarApi = false) {
     reiniciarEstadoEvaluacionesSiCambioCurso();
 
     if (!enVistaOutlineCurso() || estado.ocupado) {
@@ -1193,6 +1194,13 @@ export async function desplegarEvaluacionesAutomaticamente(alActualizar = null) 
     };
 
     try {
+        const promesaApiCurso = sincronizarEvaluacionesCursoApi(courseIdInicial, forzarApi)
+            .then(res => {
+                if (res?.disponible && !debeAbortar()) alActualizar?.();
+                return res;
+            })
+            .catch(() => null);
+
         await expandirCarpetasEvaluacionVisibles();
         if (debeAbortar()) return;
         alActualizar?.();
@@ -1307,6 +1315,7 @@ export async function desplegarEvaluacionesAutomaticamente(alActualizar = null) 
             }
         }
 
+        await promesaApiCurso;
         if (!debeAbortar()) {
             await expandirCarpetasEvaluacionVisibles();
             if (!debeAbortar()) alActualizar?.();
@@ -1329,7 +1338,7 @@ export async function desplegarEvaluacionesAutomaticamente(alActualizar = null) 
                 estado.evaluacionesTimerBackdrop = null;
             }
             setTimeout(() => {
-                desplegarEvaluacionesAutomaticamente(alActualizar);
+                desplegarEvaluacionesAutomaticamente(alActualizar, forzarApi);
             }, 350);
         } else if (courseIdInicial !== obtenerIdCursoActual()) {
             if (estado.evaluacionesTimerBackdrop) {
