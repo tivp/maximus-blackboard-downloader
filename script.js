@@ -3894,12 +3894,12 @@
                 position: relative !important;
                 isolation: isolate !important;
                 box-sizing: border-box !important;
-                border: 2px solid #000000 !important;
-                border-radius: 10px !important;
+                border: 1px solid transparent !important;
+                border-radius: 4px !important;
                 box-shadow: none !important;
                 margin-top: 3px !important;
                 margin-bottom: 3px !important;
-                transition: background-color .15s, box-shadow .15s !important;
+                transition: background-color .15s, border-color .15s, box-shadow .15s !important;
             }
 
             .maximus-fila-evaluacion::before,
@@ -3908,9 +3908,9 @@
             .maximus-fila-omitido::before {
                 content: '' !important;
                 position: absolute !important;
-                inset: 4px 6px 6px 6px !important;
+                inset: 3px 5px 5px 5px !important;
                 border: 0 !important;
-                border-radius: 6px !important;
+                border-radius: 2px !important;
                 background: linear-gradient(
                     180deg,
                     rgba(255, 255, 255, 0.72) 0%,
@@ -3934,43 +3934,51 @@
 
             .maximus-fila-evaluacion {
                 background: #f7d358 !important;
+                border-color: #b88b0e !important;
             }
 
             .maximus-fila-evaluacion:hover,
             .maximus-fila-evaluacion:focus-within {
                 background: #f4c73b !important;
+                border-color: #9c7407 !important;
             }
 
             .maximus-fila-ok {
                 background: #6fe094 !important;
+                border-color: #218c47 !important;
             }
 
             .maximus-fila-ok:hover,
             .maximus-fila-ok:focus-within {
                 background: #5bd683 !important;
+                border-color: #197339 !important;
             }
 
             .maximus-fila-error {
                 background: #f78c8c !important;
+                border-color: #c23636 !important;
             }
 
             .maximus-fila-error:hover,
             .maximus-fila-error:focus-within {
                 background: #f27878 !important;
+                border-color: #a62828 !important;
             }
 
             .maximus-fila-omitido {
                 background: #b9c5d1 !important;
+                border-color: #64748b !important;
             }
 
             .maximus-fila-omitido:hover,
             .maximus-fila-omitido:focus-within {
                 background: #a8b7c6 !important;
+                border-color: #475569 !important;
             }
 
             .maximus-fila-evaluacion-destello {
                 background: #f2be22 !important;
-                border-color: #000000 !important;
+                border-color: #9c7407 !important;
                 box-shadow: 0 0 0 3px rgba(242, 188, 36, 0.65) !important;
             }
 
