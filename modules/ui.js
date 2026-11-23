@@ -276,21 +276,28 @@ export function inyectarCss() {
             box-shadow: inset 4px 0 0 #d4a11a, 0 0 0 3px rgba(229, 184, 46, 0.55) !important;
         }
 
-        .maximus-eval-backdrop {
-            position: fixed !important;
-            inset: 0 !important;
-            z-index: 2147483645 !important;
-            background: rgba(10, 14, 23, 0.56) !important;
-            backdrop-filter: blur(6px) !important;
-            -webkit-backdrop-filter: blur(6px) !important;
-            opacity: 0 !important;
-            pointer-events: none !important;
-            transition: opacity .25s ease !important;
+        @keyframes maximus-giro {
+            to {
+                transform: rotate(360deg);
+            }
         }
 
-        .maximus-eval-backdrop.activo {
-            opacity: 1 !important;
-            pointer-events: auto !important;
+        .maximus-eval-notif-spinner {
+            display: inline-block !important;
+            width: 14px !important;
+            height: 14px !important;
+            border: 2px solid rgba(180, 134, 11, 0.28) !important;
+            border-top-color: #b4860b !important;
+            border-radius: 50% !important;
+            animation: maximus-giro .75s linear infinite !important;
+            vertical-align: middle !important;
+            flex: 0 0 auto !important;
+        }
+
+        .maximus-eval-notif-spinner.sm {
+            width: 11px !important;
+            height: 11px !important;
+            border-width: 1.5px !important;
         }
 
         .maximus-eval-notif {
@@ -298,35 +305,35 @@ export function inyectarCss() {
             top: 20px !important;
             right: 20px !important;
             z-index: 2147483646 !important;
-            width: min(400px, calc(100vw - 28px)) !important;
-            max-height: min(78vh, 560px) !important;
+            width: min(360px, calc(100vw - 28px)) !important;
+            max-height: min(70vh, 504px) !important;
             display: flex !important;
             flex-direction: column !important;
             box-sizing: border-box !important;
-            padding: 11px 14px 12px 16px !important;
+            padding: 10px 12px 10px 14px !important;
             background: #fff7cc !important;
             border: 1px solid #f0dd8c !important;
-            box-shadow: inset 4px 0 0 #e5b82e, 0 14px 34px rgba(15, 23, 42, 0.28) !important;
-            border-radius: 10px !important;
+            box-shadow: inset 4px 0 0 #e5b82e, 0 12px 30px rgba(15, 23, 42, 0.26) !important;
+            border-radius: 9px !important;
             color: #26394b !important;
-            font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif !important;
+            font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif !important;
             transition: box-shadow .2s ease, border-color .2s ease !important;
         }
 
         .maximus-eval-notif.en-automatizacion {
             border-color: #e2b824 !important;
-            box-shadow: inset 4px 0 0 #d4a11a, 0 20px 46px rgba(0, 0, 0, 0.42) !important;
+            box-shadow: inset 4px 0 0 #d4a11a, 0 16px 38px rgba(15, 23, 42, 0.34) !important;
         }
 
         .maximus-eval-notif.arrastrando {
             transition: none !important;
             user-select: none !important;
-            box-shadow: inset 4px 0 0 #d4a11a, 0 22px 52px rgba(15, 23, 42, 0.36) !important;
+            box-shadow: inset 4px 0 0 #d4a11a, 0 20px 46px rgba(15, 23, 42, 0.36) !important;
         }
 
         .maximus-eval-notif.minimizada {
             max-height: none !important;
-            width: min(320px, calc(100vw - 28px)) !important;
+            width: min(288px, calc(100vw - 28px)) !important;
         }
 
         .maximus-eval-notif.minimizada .maximus-eval-notif-cuerpo {
@@ -337,7 +344,7 @@ export function inyectarCss() {
             display: flex !important;
             align-items: center !important;
             justify-content: space-between !important;
-            gap: 8px !important;
+            gap: 6px !important;
             cursor: grab !important;
             user-select: none !important;
             touch-action: none !important;
@@ -350,14 +357,14 @@ export function inyectarCss() {
         .maximus-eval-notif-cabecera-izq {
             display: flex !important;
             align-items: center !important;
-            gap: 7px !important;
+            gap: 6px !important;
             min-width: 0 !important;
             flex: 1 1 auto !important;
         }
 
         .maximus-eval-notif-grip {
             color: #9e7a14 !important;
-            font-size: 13px !important;
+            font-size: 12px !important;
             font-weight: 700 !important;
             line-height: 1 !important;
             letter-spacing: -1px !important;
@@ -375,13 +382,13 @@ export function inyectarCss() {
             margin: 0 !important;
             padding: 0 !important;
             font-weight: 700 !important;
-            font-size: 13px !important;
+            font-size: 12px !important;
             line-height: 1.25 !important;
             color: #26394b !important;
         }
 
         .maximus-eval-notif-resumen {
-            font-size: 11px !important;
+            font-size: 10.5px !important;
             line-height: 1.25 !important;
             color: #6e5714 !important;
             margin-top: 1px !important;
@@ -390,14 +397,14 @@ export function inyectarCss() {
         .maximus-eval-notif-controles {
             display: inline-flex !important;
             align-items: center !important;
-            gap: 4px !important;
+            gap: 3px !important;
             flex: 0 0 auto !important;
         }
 
         .maximus-eval-notif-min,
         .maximus-eval-notif-cerrar {
-            width: 24px !important;
-            height: 24px !important;
+            width: 22px !important;
+            height: 22px !important;
             display: inline-flex !important;
             align-items: center !important;
             justify-content: center !important;
@@ -407,7 +414,7 @@ export function inyectarCss() {
             border-radius: 5px !important;
             background: transparent !important;
             color: #5c4b12 !important;
-            font: 700 15px/1 Arial, sans-serif !important;
+            font: 700 14px/1 Arial, sans-serif !important;
             cursor: pointer !important;
             transition: background-color .15s, border-color .15s, color .15s !important;
         }
@@ -429,11 +436,14 @@ export function inyectarCss() {
         }
 
         .maximus-eval-notif-estado {
+            display: flex !important;
+            align-items: center !important;
+            gap: 6px !important;
             margin: 4px 0 2px 0 !important;
-            padding: 4px 8px !important;
+            padding: 4px 7px !important;
             border-radius: 5px !important;
             background: rgba(229, 184, 46, 0.16) !important;
-            font-size: 12px !important;
+            font-size: 11px !important;
             font-weight: 600 !important;
             color: #6e5714 !important;
         }
@@ -446,19 +456,19 @@ export function inyectarCss() {
         }
 
         .maximus-eval-notif-lista {
-            margin: 6px 0 0 0 !important;
+            margin: 5px 0 0 0 !important;
             padding: 0 !important;
             list-style: none !important;
             display: flex !important;
             flex-direction: column !important;
-            gap: 6px !important;
+            gap: 5px !important;
         }
 
         .maximus-eval-notif-item {
             display: flex !important;
             flex-direction: column !important;
-            gap: 3px !important;
-            padding: 6px 8px !important;
+            gap: 2px !important;
+            padding: 5px 7px !important;
             border-radius: 6px !important;
             background: rgba(255, 255, 255, 0.68) !important;
             border: 1px solid rgba(240, 221, 140, 0.85) !important;
@@ -467,14 +477,14 @@ export function inyectarCss() {
         .maximus-eval-notif-item-cabecera {
             display: flex !important;
             align-items: baseline !important;
-            gap: 6px !important;
+            gap: 5px !important;
             min-width: 0 !important;
         }
 
         .maximus-eval-notif-num {
             font-weight: 700 !important;
             color: #7a5c00 !important;
-            min-width: 18px !important;
+            min-width: 16px !important;
             flex: 0 0 auto !important;
         }
 
@@ -496,9 +506,9 @@ export function inyectarCss() {
 
         .maximus-eval-notif-tag {
             flex: 0 0 auto !important;
-            font-size: 10px !important;
+            font-size: 9.5px !important;
             font-weight: 700 !important;
-            padding: 1px 6px !important;
+            padding: 1px 5px !important;
             border-radius: 999px !important;
             white-space: nowrap !important;
         }
@@ -519,16 +529,16 @@ export function inyectarCss() {
         }
 
         .maximus-eval-notif-meta {
-            padding-left: 24px !important;
-            font-size: 11px !important;
-            line-height: 1.35 !important;
+            padding-left: 21px !important;
+            font-size: 10.5px !important;
+            line-height: 1.3 !important;
             color: #5c4b12 !important;
             word-break: break-word !important;
         }
 
         .maximus-eval-notif-seccion {
-            margin-top: 8px !important;
-            padding-top: 7px !important;
+            margin-top: 7px !important;
+            padding-top: 6px !important;
             border-top: 1px dashed rgba(180, 134, 11, 0.35) !important;
         }
 
@@ -536,24 +546,24 @@ export function inyectarCss() {
             display: flex !important;
             align-items: center !important;
             justify-content: space-between !important;
-            gap: 8px !important;
-            font-size: 12px !important;
+            gap: 6px !important;
+            font-size: 11px !important;
             font-weight: 700 !important;
             color: #5c4000 !important;
-            margin: 0 0 4px 0 !important;
+            margin: 0 0 3px 0 !important;
         }
 
         .maximus-eval-notif-contador {
             display: inline-flex !important;
             align-items: center !important;
             justify-content: center !important;
-            min-width: 18px !important;
-            height: 18px !important;
-            padding: 0 6px !important;
+            min-width: 16px !important;
+            height: 16px !important;
+            padding: 0 5px !important;
             border-radius: 999px !important;
             background: rgba(180, 134, 11, 0.16) !important;
             color: #5c4000 !important;
-            font-size: 11px !important;
+            font-size: 10px !important;
             font-weight: 700 !important;
         }
 
@@ -563,8 +573,10 @@ export function inyectarCss() {
         }
 
         .maximus-eval-notif-vacio {
-            display: block !important;
-            font-size: 12px !important;
+            display: flex !important;
+            align-items: center !important;
+            gap: 6px !important;
+            font-size: 11.5px !important;
             font-style: italic !important;
             color: #7c5c0a !important;
             padding: 2px 0 2px 4px !important;
@@ -573,7 +585,7 @@ export function inyectarCss() {
         .maximus-eval-notif-check {
             color: #1a7f37 !important;
             font-weight: 700 !important;
-            font-size: 12px !important;
+            font-size: 11px !important;
             flex: 0 0 auto !important;
         }
 
@@ -827,9 +839,6 @@ export function irAEvaluacionHash(hashId) {
     }
     estado.evaluacionesAutomatizacionActiva = false;
 
-    const backdrop = document.querySelector('.maximus-eval-backdrop');
-    if (backdrop) backdrop.classList.remove('activo');
-
     const notif = document.querySelector('.maximus-eval-notif');
     if (notif) {
         notif.classList.remove('en-automatizacion');
@@ -1024,8 +1033,8 @@ function aplicarPosicionNotif(notif, pos) {
     const anchoWin = Math.max(window.innerWidth || 0, 320);
     const altoWin = Math.max(window.innerHeight || 0, 240);
     const rect = notif.getBoundingClientRect?.() || { width: 0, height: 0 };
-    const w = rect.width > 0 ? rect.width : 360;
-    const h = rect.height > 0 ? rect.height : 180;
+    const w = rect.width > 0 ? rect.width : 324;
+    const h = rect.height > 0 ? rect.height : 162;
     const maxLeft = Math.max(8, anchoWin - w - 8);
     const maxTop = Math.max(8, altoWin - h - 8);
     const left = Math.min(Math.max(8, Math.round(pos.left)), maxLeft);
@@ -1091,7 +1100,7 @@ function habilitarArrastreNotif(notif) {
         if (target?.closest?.('button, a, input, select, textarea')) return;
 
         const rect = notif.getBoundingClientRect?.() || { left: 20, top: 20 };
-        const fallbackLeft = Math.max(8, (window.innerWidth || 1280) - (rect.width > 0 ? rect.width : 400) - 20);
+        const fallbackLeft = Math.max(8, (window.innerWidth || 1280) - (rect.width > 0 ? rect.width : 360) - 20);
         arrastrando = true;
         movio = false;
         tipoArrastre = tipo;
@@ -1164,27 +1173,10 @@ export function actualizarNotificacionEvaluaciones(items = []) {
 
     const enAutomatizacion = Boolean(estado.evaluacionesAutomatizacionActiva);
 
-    if (!items.length && !enAutomatizacion) {
-        removerPanelesEvaluacion();
-        return;
-    }
-
     const contenedorRaiz = document.body || document.documentElement;
     if (!contenedorRaiz) return;
 
-    let backdrop = document.querySelector('.maximus-eval-backdrop');
-    if (!backdrop) {
-        backdrop = document.createElement('div');
-        backdrop.className = 'maximus-eval-backdrop';
-        backdrop.dataset.maximus = 'eval-backdrop';
-        backdrop.setAttribute('aria-hidden', 'true');
-        contenedorRaiz.append(backdrop);
-    }
-    if (enAutomatizacion) {
-        backdrop.classList.add('activo');
-    } else {
-        backdrop.classList.remove('activo');
-    }
+    document.querySelectorAll('.maximus-eval-backdrop').forEach(el => el.remove());
 
     let notif = document.querySelector('.maximus-eval-notif');
     if (notif && !notif.querySelector('.maximus-eval-notif-cuerpo')) {
@@ -1214,13 +1206,13 @@ export function actualizarNotificacionEvaluaciones(items = []) {
                 </div>
             </div>
             <div class="maximus-eval-notif-cuerpo">
-                <div class="maximus-eval-notif-estado" hidden>Buscando y desplegando evaluaciones...</div>
+                <div class="maximus-eval-notif-estado" hidden><span class="maximus-eval-notif-spinner sm" aria-hidden="true"></span><span>Buscando evaluaciones...</span></div>
                 <div class="maximus-eval-notif-seccion" data-maximus-seccion="pendientes">
                     <div class="maximus-eval-notif-subtitulo">
                         <span>Evaluaciones pendientes:</span>
                         <span class="maximus-eval-notif-contador maximus-eval-notif-contador-pendientes">0</span>
                     </div>
-                    <div class="maximus-eval-notif-vacio maximus-eval-notif-vacio-pendientes">Ninguna</div>
+                    <div class="maximus-eval-notif-vacio maximus-eval-notif-vacio-pendientes">No tienes nada pendiente</div>
                     <ol class="maximus-eval-notif-lista maximus-eval-notif-lista-pendientes"></ol>
                 </div>
                 <div class="maximus-eval-notif-seccion" data-maximus-seccion="completadas">
@@ -1228,7 +1220,7 @@ export function actualizarNotificacionEvaluaciones(items = []) {
                         <span>Evaluaciones completadas:</span>
                         <span class="maximus-eval-notif-contador ok maximus-eval-notif-contador-completadas">0</span>
                     </div>
-                    <div class="maximus-eval-notif-vacio maximus-eval-notif-vacio-completadas">Ninguna</div>
+                    <div class="maximus-eval-notif-vacio maximus-eval-notif-vacio-completadas">Ninguna completada</div>
                     <ol class="maximus-eval-notif-lista maximus-eval-notif-lista-completadas"></ol>
                 </div>
             </div>
@@ -1282,10 +1274,13 @@ export function actualizarNotificacionEvaluaciones(items = []) {
 
     const resumenEl = notif.querySelector('.maximus-eval-notif-resumen');
     if (resumenEl) {
-        resumenEl.textContent =
-            enAutomatizacion && !items.length
-                ? 'Analizando curso...'
-                : `${pendientes.length} ${pendientes.length === 1 ? 'pendiente' : 'pendientes'} · ${completadas.length} ${completadas.length === 1 ? 'completada' : 'completadas'}`;
+        if (enAutomatizacion && !items.length) {
+            resumenEl.textContent = 'Buscando evaluaciones...';
+        } else if (!items.length) {
+            resumenEl.textContent = 'No tienes nada pendiente';
+        } else {
+            resumenEl.textContent = `${pendientes.length} ${pendientes.length === 1 ? 'pendiente' : 'pendientes'} · ${completadas.length} ${completadas.length === 1 ? 'completada' : 'completadas'}`;
+        }
     }
 
     const firma = `${enAutomatizacion ? 1 : 0}::${items.map(it => `${it.id}:${it.estadoTipo || ''}:${it.titulo}:${it.unidad || ''}:${it.detalles || ''}`).join('||')}`;
@@ -1305,14 +1300,21 @@ export function actualizarNotificacionEvaluaciones(items = []) {
         if (!listaSeccion.length) {
             lista.hidden = true;
             if (vacio) {
-                vacio.textContent = enAutomatizacion ? 'Cargando...' : 'Ninguna';
+                if (enAutomatizacion) {
+                    vacio.innerHTML = '<span class="maximus-eval-notif-spinner" role="status" aria-label="Cargando"></span>';
+                } else {
+                    vacio.textContent = esCompletada ? 'Ninguna completada' : 'No tienes nada pendiente';
+                }
                 vacio.hidden = false;
             }
             return;
         }
 
         lista.hidden = false;
-        if (vacio) vacio.hidden = true;
+        if (vacio) {
+            vacio.hidden = true;
+            vacio.textContent = '';
+        }
 
         listaSeccion.forEach((item, idx) => {
             const li = document.createElement('li');
