@@ -359,16 +359,6 @@ export function inyectarCss() {
             flex: 1 1 auto !important;
         }
 
-        .maximus-eval-notif-grip {
-            color: #9e7a14 !important;
-            font-size: 12px !important;
-            font-weight: 700 !important;
-            line-height: 1 !important;
-            letter-spacing: -1px !important;
-            flex: 0 0 auto !important;
-            opacity: 0.85 !important;
-        }
-
         .maximus-eval-notif-titulos {
             display: flex !important;
             flex-direction: column !important;
@@ -1192,7 +1182,14 @@ export function actualizarNotificacionEvaluaciones(items = []) {
     document.querySelectorAll('.maximus-eval-backdrop').forEach(el => el.remove());
 
     let notif = document.querySelector('.maximus-eval-notif');
-    if (notif && (!notif.querySelector('.maximus-eval-notif-cuerpo') || notif.querySelector('.maximus-eval-notif-estado'))) {
+    if (
+        notif &&
+        (
+            !notif.querySelector('.maximus-eval-notif-cuerpo') ||
+            notif.querySelector('.maximus-eval-notif-estado') ||
+            notif.querySelector('.maximus-eval-notif-grip')
+        )
+    ) {
         notif._limpiarEventos?.();
         notif.remove();
         notif = null;
@@ -1207,7 +1204,6 @@ export function actualizarNotificacionEvaluaciones(items = []) {
         notif.innerHTML = `
             <div class="maximus-eval-notif-cabecera" title="Arrastra para mover · Doble clic para volver a la esquina">
                 <div class="maximus-eval-notif-cabecera-izq">
-                    <span class="maximus-eval-notif-grip" aria-hidden="true">&#8942;&#8942;</span>
                     <div class="maximus-eval-notif-titulos">
                         <div class="maximus-eval-notif-titulo">Índice de evaluaciones</div>
                         <div class="maximus-eval-notif-resumen"></div>
