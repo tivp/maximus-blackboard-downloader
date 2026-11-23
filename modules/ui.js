@@ -221,60 +221,91 @@ export function inyectarCss() {
             font: 11px Arial,sans-serif;
         }
 
-        .maximus-fila-evaluacion {
-            background: #fff7cc !important;
-            border: 1px solid #f0dd8c !important;
-            box-shadow: inset 4px 0 0 #e5b82e !important;
+        .maximus-fila-evaluacion,
+        .maximus-fila-ok,
+        .maximus-fila-error,
+        .maximus-fila-omitido {
+            position: relative !important;
+            isolation: isolate !important;
+            box-sizing: border-box !important;
+            border: 2px solid #000000 !important;
+            border-radius: 10px !important;
+            box-shadow: none !important;
+            margin-top: 3px !important;
+            margin-bottom: 3px !important;
+            transition: background-color .15s, box-shadow .15s !important;
+        }
+
+        .maximus-fila-evaluacion::before,
+        .maximus-fila-ok::before,
+        .maximus-fila-error::before,
+        .maximus-fila-omitido::before {
+            content: '' !important;
+            position: absolute !important;
+            inset: 4px 6px 6px 6px !important;
+            border: 0 !important;
             border-radius: 6px !important;
-            transition: background-color .15s, border-color .15s, box-shadow .15s;
+            background: linear-gradient(
+                180deg,
+                rgba(255, 255, 255, 0.72) 0%,
+                rgba(255, 255, 255, 0.30) 45%,
+                rgba(255, 255, 255, 0) 92%
+            ) !important;
+            pointer-events: none !important;
+            z-index: -1 !important;
+        }
+
+        .maximus-fila-evaluacion a,
+        .maximus-fila-evaluacion button,
+        .maximus-fila-ok a,
+        .maximus-fila-ok button,
+        .maximus-fila-error a,
+        .maximus-fila-error button,
+        .maximus-fila-omitido a,
+        .maximus-fila-omitido button {
+            background-color: transparent !important;
+        }
+
+        .maximus-fila-evaluacion {
+            background: #f7d358 !important;
         }
 
         .maximus-fila-evaluacion:hover,
         .maximus-fila-evaluacion:focus-within {
-            background: #ffefad !important;
-            border-color: #e6c95c !important;
-            box-shadow: inset 4px 0 0 #d4a11a !important;
+            background: #f4c73b !important;
         }
 
-        .maximus-fila-evaluacion a,
-        .maximus-fila-evaluacion button {
-            background-color: transparent !important;
+        .maximus-fila-ok {
+            background: #6fe094 !important;
         }
 
-        .maximus-fila-ok,
         .maximus-fila-ok:hover,
         .maximus-fila-ok:focus-within {
-            background: #d8f7df !important;
-            box-shadow: inset 4px 0 #29aa59 !important;
-            border-radius: 4px !important;
+            background: #5bd683 !important;
         }
 
-        .maximus-fila-error,
+        .maximus-fila-error {
+            background: #f78c8c !important;
+        }
+
         .maximus-fila-error:hover,
         .maximus-fila-error:focus-within {
-            background: #ffe0e0 !important;
-            box-shadow: inset 4px 0 #d33f45 !important;
-            border-radius: 4px !important;
+            background: #f27878 !important;
         }
 
-        .maximus-fila-omitido,
-        .maximus-fila-omitido:hover {
-            background: #eef1f4 !important;
-            box-shadow: inset 4px 0 #9aa5b1 !important;
-            border-radius: 4px !important;
+        .maximus-fila-omitido {
+            background: #b9c5d1 !important;
         }
 
-        .maximus-fila-ok a,
-        .maximus-fila-ok button,
-        .maximus-fila-error a,
-        .maximus-fila-error button {
-            background: transparent !important;
+        .maximus-fila-omitido:hover,
+        .maximus-fila-omitido:focus-within {
+            background: #a8b7c6 !important;
         }
 
         .maximus-fila-evaluacion-destello {
-            background: #ffea9f !important;
-            border-color: #d4a11a !important;
-            box-shadow: inset 4px 0 0 #d4a11a, 0 0 0 3px rgba(229, 184, 46, 0.55) !important;
+            background: #f2be22 !important;
+            border-color: #000000 !important;
+            box-shadow: 0 0 0 3px rgba(242, 188, 36, 0.65) !important;
         }
 
         @keyframes maximus-giro {
