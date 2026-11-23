@@ -314,7 +314,7 @@ export async function rehidratarDomCurso(uActiva = null, pcActivo = null) {
         () => !enVistaDocumentoPantallaCompleta() && !!document.querySelector(TARJETAS),
         CFG.ESPERA_CARGA
     );
-    await dormir(400);
+    await dormir(120);
 
     const nuevasCabeceras = cabeceras();
     const todos = nuevasCabeceras.map(x => x.el);

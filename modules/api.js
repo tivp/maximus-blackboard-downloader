@@ -1,7 +1,7 @@
 // Consulta directa a los endpoints REST de Blackboard (/learn/api/...) para sacar adjuntos sin abrir paneles en la interfaz.
 
 import { RE, estado } from './config.js';
-import { texto, limpiarPrefijoXid, esUrlScormOInteractivo, urlReal } from './utils.js';
+import { texto, limpiarPrefijoXid, esUrlScormOInteractivo, urlReal, ejecutarPool } from './utils.js';
 
 function esItemEvaluacionApi(item) {
     if (!item) return false;
@@ -137,21 +137,27 @@ export async function extraerDocumentoViaApiBlackboard(courseId, docId, nombreIt
     if (!courseId || !docId) return null;
 
     const fetchJson = async endpoint => {
+        const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const timer = ctrl ? setTimeout(() => ctrl.abort(), 8000) : null;
         try {
             const r = await fetch(endpoint, {
                 credentials: 'include',
-                headers: { Accept: 'application/json' }
+                headers: { Accept: 'application/json' },
+                ...(ctrl ? { signal: ctrl.signal } : {})
             });
             if (!r.ok) return null;
-            return r.json();
+            return await r.json();
         } catch {
             return null;
+        } finally {
+            if (timer) clearTimeout(timer);
         }
     };
 
     try {
         const bloques = [];
         const urlsVistas = new Set();
+        const textosAcumulados = [];
         let contadorVideo = 1;
         let esScormInteractivo = false;
 
@@ -263,21 +269,9 @@ export async function extraerDocumentoViaApiBlackboard(courseId, docId, nombreIt
             return texto(doc.body?.innerText || doc.body?.textContent || '');
         };
 
-        // Consultamos a la vez la API interna de Ultra y la pública v1 porque según el rol del alumno algunas propiedades solo vienen en una de las dos.
-        const [nodoInterno, nodoPublico, datosInternos, datosPublicos, adjuntosPublicos] = await Promise.all([
-            fetchJson(`/learn/api/v1/courses/${courseId}/contents/${docId}`),
-            fetchJson(`/learn/api/public/v1/courses/${courseId}/contents/${docId}`),
-            fetchJson(`/learn/api/v1/courses/${courseId}/contents/${docId}/children`),
-            fetchJson(`/learn/api/public/v1/courses/${courseId}/contents/${docId}/children`),
-            fetchJson(`/learn/api/public/v1/courses/${courseId}/contents/${docId}/attachments`)
-        ]);
-
-        const textosAcumulados = [];
-
-        extraerDeItemApi(nodoInterno);
-        extraerDeItemApi(nodoPublico);
-
-        for (const nodo of [nodoInterno, nodoPublico]) {
+        const procesarNodoRaiz = nodo => {
+            if (!nodo) return;
+            extraerDeItemApi(nodo);
             const cuerpoNodo =
                 nodo?.body?.rawText ||
                 nodo?.contentDetail?.['resource/x-bb-document']?.body?.rawText ||
@@ -288,8 +282,60 @@ export async function extraerDocumentoViaApiBlackboard(courseId, docId, nombreIt
                     textosAcumulados.push(txt);
                 }
             }
-        }
+        };
 
+        const procesarListaHijos = async listaHijos => {
+            if (!Array.isArray(listaHijos) || !listaHijos.length) return;
+
+            const hijosConAdjuntos = [];
+            for (const hijo of listaHijos) {
+                const tituloHijo = texto(hijo.title || '');
+                const handler = String(hijo.contentHandler?.id || '');
+
+                extraerDeItemApi(hijo);
+
+                if (hijo.id && /file|document/i.test(handler) && !/externallink|folder|asmt/i.test(handler)) {
+                    hijosConAdjuntos.push({ hijo, tituloHijo });
+                }
+
+                const cuerpoHtml =
+                    hijo.body?.rawText ||
+                    (typeof hijo.body === 'string' ? hijo.body : '') ||
+                    hijo.contentDetail?.['resource/x-bb-document']?.body?.rawText ||
+                    '';
+
+                if (typeof cuerpoHtml === 'string' && cuerpoHtml) {
+                    const txt = procesarHtmlCuerpo(cuerpoHtml, tituloHijo);
+                    if (txt && txt.length > 10 && !textosAcumulados.includes(txt)) {
+                        textosAcumulados.push(txt);
+                    }
+                }
+            }
+
+            if (hijosConAdjuntos.length) {
+                const respuestas = await ejecutarPool(hijosConAdjuntos, Math.min(4, hijosConAdjuntos.length), item =>
+                    fetchJson(`/learn/api/public/v1/courses/${courseId}/contents/${item.hijo.id}/attachments`).then(
+                        subAtt => ({ item, subAtt })
+                    )
+                );
+                for (const entrada of respuestas) {
+                    if (!entrada?.subAtt?.results?.length) continue;
+                    for (const att of entrada.subAtt.results) {
+                        const dlUrl = `/learn/api/public/v1/courses/${courseId}/contents/${entrada.item.hijo.id}/attachments/${att.id}/download`;
+                        agregarUrlDetectada(dlUrl, entrada.item.tituloHijo || att.fileName, att.fileName);
+                    }
+                }
+            }
+        };
+
+        // Fase 1 rápida: 3 consultas en paralelo en lugar de 5; solo caemos a /public/ si v1 no trajo contenido.
+        const [nodoInterno, datosInternos, adjuntosPublicos] = await Promise.all([
+            fetchJson(`/learn/api/v1/courses/${courseId}/contents/${docId}`),
+            fetchJson(`/learn/api/v1/courses/${courseId}/contents/${docId}/children`),
+            fetchJson(`/learn/api/public/v1/courses/${courseId}/contents/${docId}/attachments`)
+        ]);
+
+        procesarNodoRaiz(nodoInterno);
         if (esScormInteractivo) {
             return [{ omitidoInteractivo: true }];
         }
@@ -301,40 +347,27 @@ export async function extraerDocumentoViaApiBlackboard(courseId, docId, nombreIt
             }
         }
 
-        const listaHijos =
-            datosInternos?.results ||
-            datosPublicos?.results ||
-            [];
+        await procesarListaHijos(datosInternos?.results);
+        if (esScormInteractivo) {
+            return [{ omitidoInteractivo: true }];
+        }
 
-        for (const hijo of listaHijos) {
-            const tituloHijo = texto(hijo.title || '');
-            const handler = hijo.contentHandler?.id || '';
+        // Fase 2 de respaldo por roles que exponen solo /learn/api/public/v1/.
+        if (!bloques.length && !textosAcumulados.length) {
+            const [nodoPublico, datosPublicos] = await Promise.all([
+                fetchJson(`/learn/api/public/v1/courses/${courseId}/contents/${docId}`),
+                datosInternos?.results?.length
+                    ? null
+                    : fetchJson(`/learn/api/public/v1/courses/${courseId}/contents/${docId}/children`)
+            ]);
 
-            extraerDeItemApi(hijo);
-
-            if (hijo.id && /file|document|externallink/i.test(handler)) {
-                const subAtt = await fetchJson(
-                    `/learn/api/public/v1/courses/${courseId}/contents/${hijo.id}/attachments`
-                );
-                if (subAtt?.results?.length) {
-                    for (const att of subAtt.results) {
-                        const dlUrl = `/learn/api/public/v1/courses/${courseId}/contents/${hijo.id}/attachments/${att.id}/download`;
-                        agregarUrlDetectada(dlUrl, tituloHijo || att.fileName, att.fileName);
-                    }
-                }
+            procesarNodoRaiz(nodoPublico);
+            if (esScormInteractivo) {
+                return [{ omitidoInteractivo: true }];
             }
-
-            const cuerpoHtml =
-                hijo.body?.rawText ||
-                (typeof hijo.body === 'string' ? hijo.body : '') ||
-                hijo.contentDetail?.['resource/x-bb-document']?.body?.rawText ||
-                '';
-
-            if (typeof cuerpoHtml === 'string' && cuerpoHtml) {
-                const txt = procesarHtmlCuerpo(cuerpoHtml, tituloHijo);
-                if (txt && txt.length > 10 && !textosAcumulados.includes(txt)) {
-                    textosAcumulados.push(txt);
-                }
+            await procesarListaHijos(datosPublicos?.results);
+            if (esScormInteractivo) {
+                return [{ omitidoInteractivo: true }];
             }
         }
 

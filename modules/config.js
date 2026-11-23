@@ -8,7 +8,9 @@ export const CFG = Object.freeze({
     MAX_MB: 500,
     MAX_HTML: 2,
     MAX_ENLACES: 20,
-    PAUSA: 90
+    PAUSA: 15,
+    CONCURRENCIA: 5,
+    CONCURRENCIA_UNIDADES: 4
 });
 
 // Logo de Transformer (Autobot) vectorizado en Base64 a partir de Transfomer Logo.svg.

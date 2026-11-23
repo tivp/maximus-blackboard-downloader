@@ -5,11 +5,11 @@ import {
     texto,
     seguro,
     limpiarPrefijoXid,
-    clonarBytes,
     esUrlExterna,
     esUrlScormOInteractivo,
     esRutaSpaBlackboard,
-    urlReal
+    urlReal,
+    ejecutarPool
 } from './utils.js';
 
 function parsearCabeceras(raw) {
@@ -24,6 +24,9 @@ function parsearCabeceras(raw) {
 }
 
 function base64ABytes(b64) {
+    if (typeof Uint8Array.fromBase64 === 'function') {
+        return Uint8Array.fromBase64(b64);
+    }
     const bin = atob(b64);
     const len = bin.length;
     const bytes = new Uint8Array(len);
@@ -306,7 +309,7 @@ async function peticionExterna(url) {
                         return fin(reject, new Error('Archivo demasiado grande'));
                     }
                     fin(resolve, {
-                        bytes: clonarBytes(buffer),
+                        bytes: buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer),
                         headers: parsearCabeceras(r.responseHeaders),
                         url: r.finalUrl || url
                     });
@@ -365,7 +368,7 @@ async function fetchLocal(url) {
             throw new Error('Archivo demasiado grande');
         }
 
-        const bytes = clonarBytes(await r.arrayBuffer());
+        const bytes = new Uint8Array(await r.arrayBuffer());
 
         if (!bytes.length || bytes.length > CFG.MAX_MB * 1048576) {
             throw new Error('Respuesta vacía o demasiado grande');
@@ -695,14 +698,20 @@ export async function pedirArchivo(url) {
                 return { res, tipo };
             }
 
-            if (tipo.tipo === 'html' && !pagina) {
-                pagina = { res, tipo };
+            if (tipo.tipo === 'html') {
+                if (!pagina) pagina = { res, tipo };
+                if (mismoOrigen && nombre === 'Fetch') {
+                    return { res, tipo };
+                }
             }
 
             errores.push(`${nombre}: ${tipo.razon || tipo.tipo}`);
         } catch (e) {
             if (e.esCancelacion || estado.cancelado) throw e;
             errores.push(`${nombre}: ${e.message}`);
+            if (mismoOrigen && nombre === 'Fetch' && /^HTTP (?:404|410)\b/.test(e.message || '')) {
+                break;
+            }
         }
     }
 
@@ -865,24 +874,31 @@ export async function recuperar(url, nombre, nivel = 0, visitados = new Set(), s
     }
 
     const resultado = { archivos: [], errores: [] };
-
-    for (const item of links) {
-        verificarCancelacion();
-        try {
-            const r = await recuperar(
-                item.url,
-                item.nombre === 'Archivo' ? nombre : item.nombre,
-                nivel + 1,
-                visitados,
-                subCarpeta
-            );
-
-            resultado.archivos.push(...r.archivos);
-            resultado.errores.push(...r.errores);
-        } catch (e) {
-            if (e.esCancelacion || estado.cancelado) throw e;
-            resultado.errores.push(e.message);
+    const respuestas = await ejecutarPool(
+        links,
+        Math.min(3, links.length),
+        async item => {
+            verificarCancelacion();
+            try {
+                return await recuperar(
+                    item.url,
+                    item.nombre === 'Archivo' ? nombre : item.nombre,
+                    nivel + 1,
+                    visitados,
+                    subCarpeta
+                );
+            } catch (e) {
+                if (e.esCancelacion || estado.cancelado) throw e;
+                return { archivos: [], errores: [e.message] };
+            }
         }
+    );
+
+    verificarCancelacion();
+    for (const r of respuestas) {
+        if (!r) continue;
+        resultado.archivos.push(...r.archivos);
+        resultado.errores.push(...r.errores);
     }
 
     return resultado;

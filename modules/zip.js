@@ -110,6 +110,7 @@ function calcularCrc32(bytes) {
 
 export function crearZipNativo() {
     const archivos = new Map();
+    const encoder = new TextEncoder();
 
     return {
         tiene(ruta) {
@@ -123,16 +124,26 @@ export function crearZipNativo() {
 
             const bytes =
                 typeof contenido === 'string'
-                    ? new TextEncoder().encode(contenido)
-                    : clonarBytes(contenido);
+                    ? encoder.encode(contenido)
+                    : contenido instanceof Uint8Array
+                      ? contenido
+                      : contenido instanceof ArrayBuffer
+                        ? new Uint8Array(contenido)
+                        : ArrayBuffer.isView(contenido)
+                          ? new Uint8Array(contenido.buffer, contenido.byteOffset, contenido.byteLength)
+                          : clonarBytes(contenido);
+
+            const nombreBytes = encoder.encode(limpia);
+            const crc = calcularCrc32(bytes);
 
             archivos.set(limpia.toLowerCase(), {
                 ruta: limpia,
-                bytes
+                nombreBytes,
+                bytes,
+                crc
             });
         },
         generarBlob() {
-            const encoder = new TextEncoder();
             const ahora = new Date();
             const anio = Math.max(1980, ahora.getFullYear());
             const fechaDos = ((anio - 1980) << 9) | ((ahora.getMonth() + 1) << 5) | ahora.getDate();
@@ -145,13 +156,11 @@ export function crearZipNativo() {
             let total = 0;
 
             for (const item of archivos.values()) {
-                const nombreBytes = encoder.encode(item.ruta);
-                const datos = item.bytes;
+                const { nombreBytes, bytes: datos, crc } = item;
                 const tamano = datos.byteLength >>> 0;
-                const crc = calcularCrc32(datos);
 
-                // Cabecera local del archivo (30 bytes). El bit 0x0800 activa UTF-8 para tildes y eñes.
-                const localBuf = new ArrayBuffer(30);
+                // Cabecera local combinada con el nombre UTF-8 (bit 0x0800 para tildes y eñes).
+                const localBuf = new ArrayBuffer(30 + nombreBytes.byteLength);
                 const localView = new DataView(localBuf);
                 localView.setUint32(0, 0x04034b50, true);
                 localView.setUint16(4, 20, true);
@@ -164,11 +173,12 @@ export function crearZipNativo() {
                 localView.setUint32(22, tamano, true);
                 localView.setUint16(26, nombreBytes.byteLength, true);
                 localView.setUint16(28, 0, true);
+                new Uint8Array(localBuf, 30).set(nombreBytes);
 
-                partesLocales.push(new Uint8Array(localBuf), nombreBytes, datos);
+                partesLocales.push(new Uint8Array(localBuf), datos);
 
-                // Entrada para el directorio central al final del ZIP (46 bytes).
-                const centralBuf = new ArrayBuffer(46);
+                // Entrada para el directorio central al final del ZIP (46 bytes + nombre).
+                const centralBuf = new ArrayBuffer(46 + nombreBytes.byteLength);
                 const centralView = new DataView(centralBuf);
                 centralView.setUint32(0, 0x02014b50, true);
                 centralView.setUint16(4, 20, true);
@@ -187,8 +197,9 @@ export function crearZipNativo() {
                 centralView.setUint16(36, 0, true);
                 centralView.setUint32(38, 0, true);
                 centralView.setUint32(42, offsetLocal, true);
+                new Uint8Array(centralBuf, 46).set(nombreBytes);
 
-                partesCentrales.push(new Uint8Array(centralBuf), nombreBytes);
+                partesCentrales.push(new Uint8Array(centralBuf));
 
                 offsetLocal += 30 + nombreBytes.byteLength + tamano;
                 tamanoCentral += 46 + nombreBytes.byteLength;

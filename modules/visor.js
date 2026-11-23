@@ -235,7 +235,15 @@ export async function asegurarElementoEnDom(r, uActiva, uLog, pcActivo) {
     return reconectarElementoRecurso(r, uActiva);
 }
 
-// Intenta sacar el recurso por API REST primero; si no alcanza, hace clic en el ítem del DOM y lee el visor que abre Blackboard.
+let colaVisorDom = Promise.resolve();
+
+function conBloqueoVisorDom(tarea) {
+    const ejecucion = colaVisorDom.then(tarea, tarea);
+    colaVisorDom = ejecucion.catch(() => {});
+    return ejecucion;
+}
+
+// Intenta sacar el recurso por API REST primero; si no alcanza, hace clic en el ítem del DOM y lee el visor que abre Blackboard en serie.
 export async function capturarClic(r, uLog, uActiva = null, pcActivo = null) {
     verificarCancelacion();
 
@@ -263,208 +271,218 @@ export async function capturarClic(r, uLog, uActiva = null, pcActivo = null) {
         return [{ url: r.url, nombre: r.nombre }];
     }
 
-    await asegurarElementoEnDom(r, uActiva, uLog, pcActivo);
+    return conBloqueoVisorDom(async () => {
+        verificarCancelacion();
+        try {
+            await asegurarElementoEnDom(r, uActiva, uLog, pcActivo);
 
-    if (!r.el?.isConnected) {
-        throw new Error('El enlace ya no existe en el DOM');
-    }
+            if (!r.el?.isConnected) {
+                throw new Error('El enlace ya no existe en el DOM');
+            }
 
-    if (esTarjetaScormOInteractiva(r.tarjeta, r.el, r.nombre, r.carpetas || [])) {
-        return [{ omitidoInteractivo: true }];
-    }
+            if (esTarjetaScormOInteractiva(r.tarjeta, r.el, r.nombre, r.carpetas || [])) {
+                return [{ omitidoInteractivo: true }];
+            }
 
-    const hrefDirectoEl = r.el.getAttribute('href') || '';
-    if (hrefDirectoEl && esUrlScormOInteractivo(hrefDirectoEl)) {
-        return [{ omitidoInteractivo: true }];
-    }
-    if (hrefDirectoEl && !esRutaSpaBlackboard(hrefDirectoEl)) {
-        const urlDirecta = urlReal(hrefDirectoEl);
-        if (urlDirecta) {
-            return [{ url: urlDirecta, nombre: r.nombre }];
-        }
-    }
+            const hrefDirectoEl = r.el.getAttribute('href') || '';
+            if (hrefDirectoEl && esUrlScormOInteractivo(hrefDirectoEl)) {
+                return [{ omitidoInteractivo: true }];
+            }
+            if (hrefDirectoEl && !esRutaSpaBlackboard(hrefDirectoEl)) {
+                const urlDirecta = urlReal(hrefDirectoEl);
+                if (urlDirecta) {
+                    return [{ url: urlDirecta, nombre: r.nombre }];
+                }
+            }
 
-    if (!(await cerrarVisor(uLog, uActiva, pcActivo))) {
-        throw new Error('No se pudo cerrar el visor anterior');
-    }
+            if (!(await cerrarVisor(uLog, uActiva, pcActivo))) {
+                throw new Error('No se pudo cerrar el visor anterior');
+            }
 
-    verificarCancelacion();
-    await asegurarElementoEnDom(r, uActiva, uLog, pcActivo);
+            verificarCancelacion();
+            await asegurarElementoEnDom(r, uActiva, uLog, pcActivo);
 
-    const anterior = visor();
-    const srcAntes = anterior.srcIframe || '';
-    estado.ultimaUrlIframeInterceptada = '';
-    estado.ultimoInteractivoDetectado = false;
+            const anterior = visor();
+            const srcAntes = anterior.srcIframe || '';
+            estado.ultimaUrlIframeInterceptada = '';
+            estado.ultimoInteractivoDetectado = false;
 
-    r.el.click();
+            r.el.click();
 
-    const valido = await esperarHasta(() => {
-        if (esVisorInteractivoUnity()) return true;
-        if (estado.ultimaUrlIframeInterceptada) return true;
+            const valido = await esperarHasta(() => {
+                if (esVisorInteractivoUnity()) return true;
+                if (estado.ultimaUrlIframeInterceptada) return true;
 
-        const v = visor();
-        const src =
-            v.enlaceDescargaPanel?.getAttribute('data-ally-file-preview-url') ||
-            v.enlaceDescargaPanel?.getAttribute('href') ||
-            v.enlaceDescargaPanel?.getAttribute('data-download-url') ||
-            v.mediaPanel?.getAttribute('src') ||
-            v.srcIframe;
+                const v = visor();
+                const src =
+                    v.enlaceDescargaPanel?.getAttribute('data-ally-file-preview-url') ||
+                    v.enlaceDescargaPanel?.getAttribute('href') ||
+                    v.enlaceDescargaPanel?.getAttribute('data-download-url') ||
+                    v.mediaPanel?.getAttribute('src') ||
+                    v.srcIframe;
 
-        return !!(
-            enVistaDocumentoPantallaCompleta() ||
-            (v.abierto &&
-                (v.esFullDocument ||
-                    v.bloquesDoc?.length ||
-                    (src && (src !== srcAntes || !anterior.abierto)) ||
-                    v.cuerpoDocumento))
-        );
-    }, CFG.ESPERA_VISOR);
+                return !!(
+                    enVistaDocumentoPantallaCompleta() ||
+                    (v.abierto &&
+                        (v.esFullDocument ||
+                            v.bloquesDoc?.length ||
+                            (src && (src !== srcAntes || !anterior.abierto)) ||
+                            v.cuerpoDocumento))
+                );
+            }, CFG.ESPERA_VISOR);
 
-    verificarCancelacion();
+            verificarCancelacion();
 
-    // Si al abrir el ítem resultó ser un paquete de Unity o SCORM, pulsamos la X de inmediato y lo saltamos.
-    if (esVisorInteractivoUnity() || visor().esInteractivoUnity || esUrlScormOInteractivo(visor().srcIframe)) {
-        uLog?.log?.push(`[UNITY/SCORM] Detectado en "${r.nombre}" -> Presionando la X de la esquina para salir`);
-        await cerrarVisor(uLog, uActiva, pcActivo);
-        return [{ omitidoInteractivo: true }];
-    }
-
-    if (!valido && estado.ultimaUrlIframeInterceptada) {
-        return [{ url: estado.ultimaUrlIframeInterceptada, nombre: r.nombre }];
-    }
-
-    if (!valido) {
-        throw new Error('Blackboard no abrió el visor de descarga');
-    }
-
-    if (estado.ultimaUrlIframeInterceptada && !visor().abierto && !enVistaDocumentoPantallaCompleta()) {
-        return [{ url: estado.ultimaUrlIframeInterceptada, nombre: r.nombre }];
-    }
-
-    if (visor().esFullDocument || enVistaDocumentoPantallaCompleta() || r.esDocUltra) {
-        await esperarHasta(() => {
-            if (esVisorInteractivoUnity()) return true;
-            const docPanel = document.querySelector('document-panel') || visor().panel;
-            if (!docPanel) return false;
-            const cargando = docPanel.querySelector('[class*="progressContainer"], .ms-Spinner');
-            if (cargando) return false;
-            const bloques = extraerBloquesDeDocumentPanel(docPanel);
-            if (bloques.length > 0) return true;
-            const regionesArchivo = docPanel.querySelectorAll('[role="region"][aria-label="Archivo"]');
-            if (regionesArchivo && regionesArchivo.length > 0) return false;
-            const editor = docPanel.querySelector('.bbml-editor, .ql-editor');
-            return !!(editor && texto(editor.textContent).length > 20);
-        }, 8000);
-
-        await dormir(350);
-    } else {
-        await esperarHasta(() => {
-            if (esVisorInteractivoUnity()) return true;
-            const v = visor();
-            return !!(
-                v.bloquesDoc?.length ||
-                v.enlaceDescargaPanel ||
-                v.mediaPanel ||
-                v.srcIframe
-            );
-        }, 1800);
-    }
-
-    verificarCancelacion();
-
-    if (esVisorInteractivoUnity() || visor().esInteractivoUnity || esUrlScormOInteractivo(visor().srcIframe)) {
-        uLog?.log?.push(`[UNITY/SCORM] Detectado en "${r.nombre}" -> Presionando la X de la esquina para salir`);
-        await cerrarVisor(uLog, uActiva, pcActivo);
-        return [{ omitidoInteractivo: true }];
-    }
-
-    const v = visor();
-
-    const bloquesExtraidos = extraerBloquesDeDocumentPanel(v.panel || document);
-    if (bloquesExtraidos.length) {
-        return bloquesExtraidos.map(b => ({
-            url: b.url,
-            nombre: b.nombreArchivoSugerido || b.nombre,
-            subCarpeta: b.nombre
-        }));
-    }
-
-    if (v.enlacesDescarga?.length) {
-        const items = v.enlacesDescarga
-            .map(el => ({
-                url: urlReal(
-                    el.getAttribute('data-ally-file-preview-url') ||
-                    el.getAttribute('href') ||
-                    el.getAttribute('data-download-url')
-                ),
-                nombre: limpiarPrefijoXid(
-                    el.getAttribute('data-ally-file-eid') ||
-                    el.getAttribute('download') ||
-                    r.nombre
-                )
-            }))
-            .filter(x => x.url);
-
-        if (items.length) return items;
-    }
-
-    const directo =
-        v.enlaceDescargaPanel?.getAttribute('data-ally-file-preview-url') ||
-        v.enlaceDescargaPanel?.getAttribute('href') ||
-        v.enlaceDescargaPanel?.getAttribute('data-download-url') ||
-        v.mediaPanel?.getAttribute('src');
-
-    if (directo && urlReal(directo)) {
-        return [{ url: urlReal(directo), nombre: r.nombre }];
-    }
-
-    const urlIframe = urlReal(v.srcIframe);
-    if (urlIframe) {
-        return [{ url: urlIframe, nombre: r.nombre }];
-    }
-
-    try {
-        const docIframe = v.iframe?.contentDocument;
-        if (docIframe) {
-            if (docIframe.querySelector('#unity-container, #unity-canvas, canvas[id*="unity" i]')) {
-                uLog?.log?.push(`[UNITY/SCORM] Canvas Unity detectado en "${r.nombre}" -> Presionando la X`);
+            // Si al abrir el ítem resultó ser un paquete de Unity o SCORM, pulsamos la X de inmediato y lo saltamos.
+            if (esVisorInteractivoUnity() || visor().esInteractivoUnity || esUrlScormOInteractivo(visor().srcIframe)) {
+                uLog?.log?.push(`[UNITY/SCORM] Detectado en "${r.nombre}" -> Presionando la X de la esquina para salir`);
                 await cerrarVisor(uLog, uActiva, pcActivo);
                 return [{ omitidoInteractivo: true }];
             }
 
-            const internos = [
-                ...docIframe.querySelectorAll(
-                    'a[download], a[href*="bbcswebdav"], audio[src], video[src], source[src], embed[src]'
-                )
-            ]
-                .map(el => ({
-                    url: urlReal(el.getAttribute('href') || el.getAttribute('src'), location.href),
-                    nombre: r.nombre
-                }))
-                .filter(x => x.url);
+            if (!valido && estado.ultimaUrlIframeInterceptada) {
+                return [{ url: estado.ultimaUrlIframeInterceptada, nombre: r.nombre }];
+            }
 
-            if (internos.length) {
-                return internos;
+            if (!valido) {
+                throw new Error('Blackboard no abrió el visor de descarga');
+            }
+
+            if (estado.ultimaUrlIframeInterceptada && !visor().abierto && !enVistaDocumentoPantallaCompleta()) {
+                return [{ url: estado.ultimaUrlIframeInterceptada, nombre: r.nombre }];
+            }
+
+            if (visor().esFullDocument || enVistaDocumentoPantallaCompleta() || r.esDocUltra) {
+                await esperarHasta(() => {
+                    if (esVisorInteractivoUnity()) return true;
+                    const docPanel = document.querySelector('document-panel') || visor().panel;
+                    if (!docPanel) return false;
+                    const cargando = docPanel.querySelector('[class*="progressContainer"], .ms-Spinner');
+                    if (cargando) return false;
+                    const bloques = extraerBloquesDeDocumentPanel(docPanel);
+                    if (bloques.length > 0) return true;
+                    const regionesArchivo = docPanel.querySelectorAll('[role="region"][aria-label="Archivo"]');
+                    if (regionesArchivo && regionesArchivo.length > 0) return false;
+                    if (visor().enlacesDescarga?.length) return true;
+                    const editor = docPanel.querySelector('.bbml-editor, .ql-editor');
+                    return !!(editor && texto(editor.textContent).length > 20);
+                }, 8000);
+
+                await dormir(100);
+            } else {
+                await esperarHasta(() => {
+                    if (esVisorInteractivoUnity()) return true;
+                    const v = visor();
+                    return !!(
+                        v.bloquesDoc?.length ||
+                        v.enlaceDescargaPanel ||
+                        v.mediaPanel ||
+                        v.srcIframe
+                    );
+                }, 1800);
+            }
+
+            verificarCancelacion();
+
+            if (esVisorInteractivoUnity() || visor().esInteractivoUnity || esUrlScormOInteractivo(visor().srcIframe)) {
+                uLog?.log?.push(`[UNITY/SCORM] Detectado en "${r.nombre}" -> Presionando la X de la esquina para salir`);
+                await cerrarVisor(uLog, uActiva, pcActivo);
+                return [{ omitidoInteractivo: true }];
+            }
+
+            const v = visor();
+
+            const bloquesExtraidos = extraerBloquesDeDocumentPanel(v.panel || document);
+            if (bloquesExtraidos.length) {
+                return bloquesExtraidos.map(b => ({
+                    url: b.url,
+                    nombre: b.nombreArchivoSugerido || b.nombre,
+                    subCarpeta: b.nombre
+                }));
+            }
+
+            if (v.enlacesDescarga?.length) {
+                const items = v.enlacesDescarga
+                    .map(el => ({
+                        url: urlReal(
+                            el.getAttribute('data-ally-file-preview-url') ||
+                            el.getAttribute('href') ||
+                            el.getAttribute('data-download-url')
+                        ),
+                        nombre: limpiarPrefijoXid(
+                            el.getAttribute('data-ally-file-eid') ||
+                            el.getAttribute('download') ||
+                            r.nombre
+                        )
+                    }))
+                    .filter(x => x.url);
+
+                if (items.length) return items;
+            }
+
+            const directo =
+                v.enlaceDescargaPanel?.getAttribute('data-ally-file-preview-url') ||
+                v.enlaceDescargaPanel?.getAttribute('href') ||
+                v.enlaceDescargaPanel?.getAttribute('data-download-url') ||
+                v.mediaPanel?.getAttribute('src');
+
+            if (directo && urlReal(directo)) {
+                return [{ url: urlReal(directo), nombre: r.nombre }];
+            }
+
+            const urlIframe = urlReal(v.srcIframe);
+            if (urlIframe) {
+                return [{ url: urlIframe, nombre: r.nombre }];
+            }
+
+            try {
+                const docIframe = v.iframe?.contentDocument;
+                if (docIframe) {
+                    if (docIframe.querySelector('#unity-container, #unity-canvas, canvas[id*="unity" i]')) {
+                        uLog?.log?.push(`[UNITY/SCORM] Canvas Unity detectado en "${r.nombre}" -> Presionando la X`);
+                        await cerrarVisor(uLog, uActiva, pcActivo);
+                        return [{ omitidoInteractivo: true }];
+                    }
+
+                    const internos = [
+                        ...docIframe.querySelectorAll(
+                            'a[download], a[href*="bbcswebdav"], audio[src], video[src], source[src], embed[src]'
+                        )
+                    ]
+                        .map(el => ({
+                            url: urlReal(el.getAttribute('href') || el.getAttribute('src'), location.href),
+                            nombre: r.nombre
+                        }))
+                        .filter(x => x.url);
+
+                    if (internos.length) {
+                        return internos;
+                    }
+                }
+            } catch {
+                // Iframe en otro dominio bloqueado por políticas del navegador.
+            }
+
+            const contenedorTexto = v.panel || document.querySelector('document-panel');
+            if (contenedorTexto) {
+                const parrafos = [...contenedorTexto.querySelectorAll('.ql-editor, .bbml-editor')]
+                    .map(ed => (ed.innerText || ed.textContent || '').trim())
+                    .filter(Boolean)
+                    .join('\r\n\r\n');
+
+                const contenidoTxt =
+                    parrafos ||
+                    texto(v.cuerpoDocumento?.innerText || v.cuerpoDocumento?.textContent || '');
+                if (contenidoTxt && contenidoTxt.length > 5) {
+                    return [{ textoPlano: contenidoTxt }];
+                }
+            }
+
+            throw new Error('El visor no tiene archivo descargable');
+        } finally {
+            if (visor().abierto || visor().esFullDocument || enVistaDocumentoPantallaCompleta()) {
+                await cerrarVisor(uLog, uActiva, pcActivo);
             }
         }
-    } catch {
-        // Iframe en otro dominio bloqueado por políticas del navegador.
-    }
-
-    const contenedorTexto = v.panel || document.querySelector('document-panel');
-    if (contenedorTexto) {
-        const parrafos = [...contenedorTexto.querySelectorAll('.ql-editor, .bbml-editor')]
-            .map(ed => (ed.innerText || ed.textContent || '').trim())
-            .filter(Boolean)
-            .join('\r\n\r\n');
-
-        const contenidoTxt =
-            parrafos ||
-            texto(v.cuerpoDocumento?.innerText || v.cuerpoDocumento?.textContent || '');
-        if (contenidoTxt && contenidoTxt.length > 5) {
-            return [{ textoPlano: contenidoTxt }];
-        }
-    }
-
-    throw new Error('El visor no tiene archivo descargable');
+    });
 }

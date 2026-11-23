@@ -24,7 +24,9 @@
         MAX_MB: 500,
         MAX_HTML: 2,
         MAX_ENLACES: 20,
-        PAUSA: 90
+        PAUSA: 15,
+        CONCURRENCIA: 5,
+        CONCURRENCIA_UNIDADES: 4
     });
 
     const RE = {
@@ -531,6 +533,7 @@
 
     function crearZipNativo() {
         const archivos = new Map();
+        const encoder = new TextEncoder();
 
         return {
             tiene(ruta) {
@@ -544,16 +547,26 @@
 
                 const bytes =
                     typeof contenido === 'string'
-                        ? new TextEncoder().encode(contenido)
-                        : clonarBytes(contenido);
+                        ? encoder.encode(contenido)
+                        : contenido instanceof Uint8Array
+                          ? contenido
+                          : contenido instanceof ArrayBuffer
+                            ? new Uint8Array(contenido)
+                            : ArrayBuffer.isView(contenido)
+                              ? new Uint8Array(contenido.buffer, contenido.byteOffset, contenido.byteLength)
+                              : clonarBytes(contenido);
+
+                const nombreBytes = encoder.encode(limpia);
+                const crc = calcularCrc32(bytes);
 
                 archivos.set(limpia.toLowerCase(), {
                     ruta: limpia,
-                    bytes
+                    nombreBytes,
+                    bytes,
+                    crc
                 });
             },
             generarBlob() {
-                const encoder = new TextEncoder();
                 const ahora = new Date();
                 const anio = Math.max(1980, ahora.getFullYear());
                 const fechaDos = ((anio - 1980) << 9) | ((ahora.getMonth() + 1) << 5) | ahora.getDate();
@@ -566,12 +579,10 @@
                 let total = 0;
 
                 for (const item of archivos.values()) {
-                    const nombreBytes = encoder.encode(item.ruta);
-                    const datos = item.bytes;
+                    const { nombreBytes, bytes: datos, crc } = item;
                     const tamano = datos.byteLength >>> 0;
-                    const crc = calcularCrc32(datos);
 
-                    const localBuf = new ArrayBuffer(30);
+                    const localBuf = new ArrayBuffer(30 + nombreBytes.byteLength);
                     const localView = new DataView(localBuf);
                     localView.setUint32(0, 0x04034b50, true);
                     localView.setUint16(4, 20, true);
@@ -584,10 +595,11 @@
                     localView.setUint32(22, tamano, true);
                     localView.setUint16(26, nombreBytes.byteLength, true);
                     localView.setUint16(28, 0, true);
+                    new Uint8Array(localBuf, 30).set(nombreBytes);
 
-                    partesLocales.push(new Uint8Array(localBuf), nombreBytes, datos);
+                    partesLocales.push(new Uint8Array(localBuf), datos);
 
-                    const centralBuf = new ArrayBuffer(46);
+                    const centralBuf = new ArrayBuffer(46 + nombreBytes.byteLength);
                     const centralView = new DataView(centralBuf);
                     centralView.setUint32(0, 0x02014b50, true);
                     centralView.setUint16(4, 20, true);
@@ -606,8 +618,9 @@
                     centralView.setUint16(36, 0, true);
                     centralView.setUint32(38, 0, true);
                     centralView.setUint32(42, offsetLocal, true);
+                    new Uint8Array(centralBuf, 46).set(nombreBytes);
 
-                    partesCentrales.push(new Uint8Array(centralBuf), nombreBytes);
+                    partesCentrales.push(new Uint8Array(centralBuf));
 
                     offsetLocal += 30 + nombreBytes.byteLength + tamano;
                     tamanoCentral += 46 + nombreBytes.byteLength;
@@ -711,21 +724,27 @@
         if (!courseId || !docId) return null;
 
         const fetchJson = async endpoint => {
+            const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+            const timer = ctrl ? setTimeout(() => ctrl.abort(), 8000) : null;
             try {
                 const r = await fetch(endpoint, {
                     credentials: 'include',
-                    headers: { Accept: 'application/json' }
+                    headers: { Accept: 'application/json' },
+                    ...(ctrl ? { signal: ctrl.signal } : {})
                 });
                 if (!r.ok) return null;
-                return r.json();
+                return await r.json();
             } catch {
                 return null;
+            } finally {
+                if (timer) clearTimeout(timer);
             }
         };
 
         try {
             const bloques = [];
             const urlsVistas = new Set();
+            const textosAcumulados = [];
             let contadorVideo = 1;
             let esScormInteractivo = false;
 
@@ -836,17 +855,73 @@
                 return texto(doc.body?.innerText || doc.body?.textContent || '');
             };
 
-            const [nodoInterno, nodoPublico, datosInternos, datosPublicos, adjuntosPublicos] = await Promise.all([
+            const procesarNodoRaiz = nodo => {
+                if (!nodo) return;
+                extraerDeItemApi(nodo);
+                const cuerpoNodo =
+                    nodo?.body?.rawText ||
+                    nodo?.contentDetail?.['resource/x-bb-document']?.body?.rawText ||
+                    '';
+                if (typeof cuerpoNodo === 'string' && cuerpoNodo) {
+                    const txt = procesarHtmlCuerpo(cuerpoNodo, nombreItem);
+                    if (txt && txt.length > 10 && !textosAcumulados.includes(txt)) {
+                        textosAcumulados.push(txt);
+                    }
+                }
+            };
+
+            const procesarListaHijos = async listaHijos => {
+                if (!Array.isArray(listaHijos) || !listaHijos.length) return;
+
+                const hijosConAdjuntos = [];
+                for (const hijo of listaHijos) {
+                    const tituloHijo = texto(hijo.title || '');
+                    const handler = String(hijo.contentHandler?.id || '');
+
+                    extraerDeItemApi(hijo);
+
+                    if (hijo.id && /file|document/i.test(handler) && !/externallink|folder|asmt/i.test(handler)) {
+                        hijosConAdjuntos.push({ hijo, tituloHijo });
+                    }
+
+                    const cuerpoHtml =
+                        hijo.body?.rawText ||
+                        (typeof hijo.body === 'string' ? hijo.body : '') ||
+                        hijo.contentDetail?.['resource/x-bb-document']?.body?.rawText ||
+                        '';
+
+                    if (typeof cuerpoHtml === 'string' && cuerpoHtml) {
+                        const txt = procesarHtmlCuerpo(cuerpoHtml, tituloHijo);
+                        if (txt && txt.length > 10 && !textosAcumulados.includes(txt)) {
+                            textosAcumulados.push(txt);
+                        }
+                    }
+                }
+
+                if (hijosConAdjuntos.length) {
+                    const respuestas = await ejecutarPool(hijosConAdjuntos, Math.min(4, hijosConAdjuntos.length), item =>
+                        fetchJson(`/learn/api/public/v1/courses/${courseId}/contents/${item.hijo.id}/attachments`).then(
+                            subAtt => ({ item, subAtt })
+                        )
+                    );
+                    for (const entrada of respuestas) {
+                        if (!entrada?.subAtt?.results?.length) continue;
+                        for (const att of entrada.subAtt.results) {
+                            const dlUrl = `/learn/api/public/v1/courses/${courseId}/contents/${entrada.item.hijo.id}/attachments/${att.id}/download`;
+                            agregarUrlDetectada(dlUrl, entrada.item.tituloHijo || att.fileName, att.fileName);
+                        }
+                    }
+                }
+            };
+
+            // Fase 1 rápida: 3 consultas en paralelo; solo caemos a /public/ si v1 no trajo contenido.
+            const [nodoInterno, datosInternos, adjuntosPublicos] = await Promise.all([
                 fetchJson(`/learn/api/v1/courses/${courseId}/contents/${docId}`),
-                fetchJson(`/learn/api/public/v1/courses/${courseId}/contents/${docId}`),
                 fetchJson(`/learn/api/v1/courses/${courseId}/contents/${docId}/children`),
-                fetchJson(`/learn/api/public/v1/courses/${courseId}/contents/${docId}/children`),
                 fetchJson(`/learn/api/public/v1/courses/${courseId}/contents/${docId}/attachments`)
             ]);
 
-            extraerDeItemApi(nodoInterno);
-            extraerDeItemApi(nodoPublico);
-
+            procesarNodoRaiz(nodoInterno);
             if (esScormInteractivo) {
                 return [{ omitidoInteractivo: true }];
             }
@@ -858,42 +933,27 @@
                 }
             }
 
-            const listaHijos =
-                datosInternos?.results ||
-                datosPublicos?.results ||
-                [];
+            await procesarListaHijos(datosInternos?.results);
+            if (esScormInteractivo) {
+                return [{ omitidoInteractivo: true }];
+            }
 
-            const textosAcumulados = [];
+            // Fase 2 de respaldo por roles que exponen solo /learn/api/public/v1/.
+            if (!bloques.length && !textosAcumulados.length) {
+                const [nodoPublico, datosPublicos] = await Promise.all([
+                    fetchJson(`/learn/api/public/v1/courses/${courseId}/contents/${docId}`),
+                    datosInternos?.results?.length
+                        ? null
+                        : fetchJson(`/learn/api/public/v1/courses/${courseId}/contents/${docId}/children`)
+                ]);
 
-            for (const hijo of listaHijos) {
-                const tituloHijo = texto(hijo.title || '');
-                const handler = hijo.contentHandler?.id || '';
-
-                extraerDeItemApi(hijo);
-
-                if (hijo.id && /file|document|externallink/i.test(handler)) {
-                    const subAtt = await fetchJson(
-                        `/learn/api/public/v1/courses/${courseId}/contents/${hijo.id}/attachments`
-                    );
-                    if (subAtt?.results?.length) {
-                        for (const att of subAtt.results) {
-                            const dlUrl = `/learn/api/public/v1/courses/${courseId}/contents/${hijo.id}/attachments/${att.id}/download`;
-                            agregarUrlDetectada(dlUrl, tituloHijo || att.fileName, att.fileName);
-                        }
-                    }
+                procesarNodoRaiz(nodoPublico);
+                if (esScormInteractivo) {
+                    return [{ omitidoInteractivo: true }];
                 }
-
-                const cuerpoHtml =
-                    hijo.body?.rawText ||
-                    hijo.body ||
-                    hijo.contentDetail?.['resource/x-bb-document']?.body?.rawText ||
-                    '';
-
-                if (typeof cuerpoHtml === 'string' && cuerpoHtml) {
-                    const txt = procesarHtmlCuerpo(cuerpoHtml, tituloHijo);
-                    if (txt && txt.length > 10) {
-                        textosAcumulados.push(txt);
-                    }
+                await procesarListaHijos(datosPublicos?.results);
+                if (esScormInteractivo) {
+                    return [{ omitidoInteractivo: true }];
                 }
             }
 
@@ -2756,7 +2816,7 @@
             () => !enVistaDocumentoPantallaCompleta() && !!document.querySelector(TARJETAS),
             CFG.ESPERA_CARGA
         );
-        await dormir(400);
+        await dormir(120);
 
         const nuevasCabeceras = cabeceras();
         const todos = nuevasCabeceras.map(x => x.el);
@@ -3775,7 +3835,7 @@
     // ESPERAR ACTUALIZACIÓN DE BLACKBOARD
     // ==================================================
 
-    async function esperarHasta(prueba, ms, paso = 120) {
+    async function esperarHasta(prueba, ms, paso = 50) {
         let transcurrido = 0;
         let ultimoTick = Date.now();
 
@@ -3804,6 +3864,26 @@
         } catch {
             return false;
         }
+    }
+
+    async function ejecutarPool(lista, concurrencia, tarea) {
+        const items = Array.isArray(lista) ? lista : [];
+        if (!items.length) return [];
+
+        const limite = Math.max(1, Math.min(Number(concurrencia) || 1, items.length));
+        const resultados = new Array(items.length);
+        let cursor = 0;
+
+        const worker = async () => {
+            while (cursor < items.length) {
+                if (cancelado) break;
+                const idx = cursor++;
+                resultados[idx] = await tarea(items[idx], idx);
+            }
+        };
+
+        await Promise.all(Array.from({ length: limite }, worker));
+        return resultados;
     }
 
     function dentroDeUnidad(el, u) {
@@ -3859,6 +3939,10 @@
                 )
             ].some(x => x !== u.titulo && dentroDeUnidad(x, u));
 
+        if (control?.getAttribute('aria-expanded') !== 'false' && hayContenidoDescargable()) {
+            return;
+        }
+
         if (
             control?.getAttribute('aria-expanded') === 'false' ||
             (!hayContenidoDescargable() && control)
@@ -3870,12 +3954,15 @@
 
             await esperarHasta(
                 () => hayContenidoDescargable(),
-                CFG.ESPERA_CARGA
+                CFG.ESPERA_CARGA,
+                50
             );
         }
 
-        await esperarHasta(hayContenidoDescargable, 4000);
-        await dormir(350);
+        if (!hayContenidoDescargable()) {
+            await esperarHasta(hayContenidoDescargable, 4000, 50);
+        }
+        await dormir(80);
     }
 
     async function expandirCarpetas(u) {
@@ -3904,7 +3991,7 @@
 
             if (!botones.length) break;
 
-            let abiertos = 0;
+            const pendientesEspera = [];
 
             for (const boton of botones) {
                 verificarCancelacion();
@@ -3919,24 +4006,31 @@
 
                 try {
                     boton.click();
-                    abiertos++;
+                    pendientesEspera.push({ boton, cardCarpeta, hijosAntes });
+                } catch (e) {
+                    u.log.push(`[CARPETA] ${e.message}`);
+                }
+            }
 
-                    await esperarHasta(
+            if (!pendientesEspera.length) break;
+
+            await Promise.all(
+                pendientesEspera.map(({ boton, cardCarpeta, hijosAntes }) =>
+                    esperarHasta(
                         () =>
                             !boton.isConnected ||
                             (boton.getAttribute('aria-expanded') === 'true' &&
                                 (!cardCarpeta ||
                                     (!cardCarpeta.querySelector('.ms-Spinner, [data-testid="skeleton-loader"]') &&
                                         cardCarpeta.querySelectorAll(TARJETAS).length > hijosAntes))),
-                        2800
-                    );
-                } catch (e) {
-                    u.log.push(`[CARPETA] ${e.message}`);
-                }
-            }
-
-            if (!abiertos) break;
-            await dormir(350);
+                        2500,
+                        50
+                    ).catch(e => {
+                        u.log.push(`[CARPETA] ${e.message}`);
+                    })
+                )
+            );
+            await dormir(80);
         }
     }
 
@@ -4391,7 +4485,7 @@
                     }
 
                     fin(resolve, {
-                        bytes: clonarBytes(buffer),
+                        bytes: buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer),
                         headers: headers(r.responseHeaders),
                         url: r.finalUrl || url
                     });
@@ -4430,7 +4524,7 @@
                 throw new Error('Archivo demasiado grande');
             }
 
-            const bytes = clonarBytes(await r.arrayBuffer());
+            const bytes = new Uint8Array(await r.arrayBuffer());
 
             if (!bytes.length || bytes.length > CFG.MAX_MB * 1048576) {
                 throw new Error('Respuesta vacía o demasiado grande');
@@ -4768,14 +4862,20 @@
                     return { res, tipo };
                 }
 
-                if (tipo.tipo === 'html' && !pagina) {
-                    pagina = { res, tipo };
+                if (tipo.tipo === 'html') {
+                    if (!pagina) pagina = { res, tipo };
+                    if (mismoOrigen && nombre === 'Fetch') {
+                        return { res, tipo };
+                    }
                 }
 
                 errores.push(`${nombre}: ${tipo.razon || tipo.tipo}`);
             } catch (e) {
                 if (e.esCancelacion || cancelado) throw e;
                 errores.push(`${nombre}: ${e.message}`);
+                if (mismoOrigen && nombre === 'Fetch' && /^HTTP (?:404|410)\b/.test(e.message || '')) {
+                    break;
+                }
             }
         }
 
@@ -4946,24 +5046,31 @@
         }
 
         const resultado = { archivos: [], errores: [] };
-
-        for (const item of links) {
-            verificarCancelacion();
-            try {
-                const r = await recuperar(
-                    item.url,
-                    item.nombre === 'Archivo' ? nombre : item.nombre,
-                    nivel + 1,
-                    visitados,
-                    subCarpeta
-                );
-
-                resultado.archivos.push(...r.archivos);
-                resultado.errores.push(...r.errores);
-            } catch (e) {
-                if (e.esCancelacion || cancelado) throw e;
-                resultado.errores.push(e.message);
+        const respuestas = await ejecutarPool(
+            links,
+            Math.min(3, links.length),
+            async item => {
+                verificarCancelacion();
+                try {
+                    return await recuperar(
+                        item.url,
+                        item.nombre === 'Archivo' ? nombre : item.nombre,
+                        nivel + 1,
+                        visitados,
+                        subCarpeta
+                    );
+                } catch (e) {
+                    if (e.esCancelacion || cancelado) throw e;
+                    return { archivos: [], errores: [e.message] };
+                }
             }
+        );
+
+        verificarCancelacion();
+        for (const r of respuestas) {
+            if (!r) continue;
+            resultado.archivos.push(...r.archivos);
+            resultado.errores.push(...r.errores);
         }
 
         return resultado;
@@ -5161,6 +5268,14 @@
         return cerrado;
     }
 
+    let colaVisorDom = Promise.resolve();
+
+    function conBloqueoVisorDom(tarea) {
+        const ejecucion = colaVisorDom.then(tarea, tarea);
+        colaVisorDom = ejecucion.catch(() => {});
+        return ejecucion;
+    }
+
     async function capturarClic(r, uLog, uActiva = null, pcActivo = null) {
         verificarCancelacion();
 
@@ -5189,216 +5304,226 @@
             return [{ url: r.url, nombre: r.nombre }];
         }
 
-        // PASO NINJA 2: Asegurar que estamos en /outline y que el enlace existe en el DOM
-        await asegurarElementoEnDom(r, uActiva, uLog, pcActivo);
+        // PASO NINJA 2: Asegurar que estamos en /outline y usar el visor DOM en serie para evitar colisiones
+        return conBloqueoVisorDom(async () => {
+            verificarCancelacion();
+            try {
+                await asegurarElementoEnDom(r, uActiva, uLog, pcActivo);
 
-        if (!r.el?.isConnected) {
-            throw new Error('El enlace ya no existe en el DOM');
-        }
+                if (!r.el?.isConnected) {
+                    throw new Error('El enlace ya no existe en el DOM');
+                }
 
-        // Si al reconectar el elemento detectamos que es un paquete SCORM/Unity, omitirlo
-        if (esTarjetaScormOInteractiva(r.tarjeta, r.el, r.nombre, r.carpetas || [])) {
-            return [{ omitidoInteractivo: true }];
-        }
+                // Si al reconectar el elemento detectamos que es un paquete SCORM/Unity, omitirlo
+                if (esTarjetaScormOInteractiva(r.tarjeta, r.el, r.nombre, r.carpetas || [])) {
+                    return [{ omitidoInteractivo: true }];
+                }
 
-        const hrefDirectoEl = r.el.getAttribute('href') || '';
-        if (hrefDirectoEl && esUrlScormOInteractivo(hrefDirectoEl)) {
-            return [{ omitidoInteractivo: true }];
-        }
-        if (hrefDirectoEl && !esRutaSpaBlackboard(hrefDirectoEl)) {
-            const urlDirecta = urlReal(hrefDirectoEl);
-            if (urlDirecta) {
-                return [{ url: urlDirecta, nombre: r.nombre }];
-            }
-        }
+                const hrefDirectoEl = r.el.getAttribute('href') || '';
+                if (hrefDirectoEl && esUrlScormOInteractivo(hrefDirectoEl)) {
+                    return [{ omitidoInteractivo: true }];
+                }
+                if (hrefDirectoEl && !esRutaSpaBlackboard(hrefDirectoEl)) {
+                    const urlDirecta = urlReal(hrefDirectoEl);
+                    if (urlDirecta) {
+                        return [{ url: urlDirecta, nombre: r.nombre }];
+                    }
+                }
 
-        if (!(await cerrarVisor(uLog, uActiva, pcActivo))) {
-            throw new Error('No se pudo cerrar el visor anterior');
-        }
+                if (!(await cerrarVisor(uLog, uActiva, pcActivo))) {
+                    throw new Error('No se pudo cerrar el visor anterior');
+                }
 
-        verificarCancelacion();
-        await asegurarElementoEnDom(r, uActiva, uLog, pcActivo);
+                verificarCancelacion();
+                await asegurarElementoEnDom(r, uActiva, uLog, pcActivo);
 
-        const anterior = visor();
-        const srcAntes = anterior.srcIframe || '';
-        ultimaUrlIframeInterceptada = '';
-        ultimoInteractivoDetectado = false;
+                const anterior = visor();
+                const srcAntes = anterior.srcIframe || '';
+                ultimaUrlIframeInterceptada = '';
+                ultimoInteractivoDetectado = false;
 
-        r.el.click();
+                r.el.click();
 
-        const valido = await esperarHasta(() => {
-            // Si detecta que se abrió Unity WebGL o un paquete SCORM, terminar espera de inmediato
-            if (esVisorInteractivoUnity()) return true;
-            if (ultimaUrlIframeInterceptada) return true;
+                const valido = await esperarHasta(() => {
+                    // Si detecta que se abrió Unity WebGL o un paquete SCORM, terminar espera de inmediato
+                    if (esVisorInteractivoUnity()) return true;
+                    if (ultimaUrlIframeInterceptada) return true;
 
-            const v = visor();
-            const src =
-                v.enlaceDescargaPanel?.getAttribute('data-ally-file-preview-url') ||
-                v.enlaceDescargaPanel?.getAttribute('href') ||
-                v.enlaceDescargaPanel?.getAttribute('data-download-url') ||
-                v.mediaPanel?.getAttribute('src') ||
-                v.srcIframe;
+                    const v = visor();
+                    const src =
+                        v.enlaceDescargaPanel?.getAttribute('data-ally-file-preview-url') ||
+                        v.enlaceDescargaPanel?.getAttribute('href') ||
+                        v.enlaceDescargaPanel?.getAttribute('data-download-url') ||
+                        v.mediaPanel?.getAttribute('src') ||
+                        v.srcIframe;
 
-            return !!(
-                enVistaDocumentoPantallaCompleta() ||
-                (v.abierto &&
-                    (v.esFullDocument ||
-                        v.bloquesDoc?.length ||
-                        (src && (src !== srcAntes || !anterior.abierto)) ||
-                        v.cuerpoDocumento))
-            );
-        }, CFG.ESPERA_VISOR);
+                    return !!(
+                        enVistaDocumentoPantallaCompleta() ||
+                        (v.abierto &&
+                            (v.esFullDocument ||
+                                v.bloquesDoc?.length ||
+                                (src && (src !== srcAntes || !anterior.abierto)) ||
+                                v.cuerpoDocumento))
+                    );
+                }, CFG.ESPERA_VISOR);
 
-        verificarCancelacion();
+                verificarCancelacion();
 
-        // Si se abrió un contenido interactivo tipo Unity WebGL / SCORM -> presionar la X de la esquina inmediatamente
-        if (esVisorInteractivoUnity() || visor().esInteractivoUnity || esUrlScormOInteractivo(visor().srcIframe)) {
-            uLog?.log?.push(`[UNITY/SCORM] Detectado en "${r.nombre}" -> Presionando la X de la esquina para salir`);
-            await cerrarVisor(uLog, uActiva, pcActivo);
-            return [{ omitidoInteractivo: true }];
-        }
-
-        if (!valido && ultimaUrlIframeInterceptada) {
-            return [{ url: ultimaUrlIframeInterceptada, nombre: r.nombre }];
-        }
-
-        if (!valido) {
-            throw new Error('Blackboard no abrió el visor de descarga');
-        }
-
-        if (ultimaUrlIframeInterceptada && !visor().abierto && !enVistaDocumentoPantallaCompleta()) {
-            return [{ url: ultimaUrlIframeInterceptada, nombre: r.nombre }];
-        }
-
-        if (visor().esFullDocument || enVistaDocumentoPantallaCompleta() || r.esDocUltra) {
-            await esperarHasta(() => {
-                if (esVisorInteractivoUnity()) return true;
-                const docPanel = document.querySelector('document-panel') || visor().panel;
-                if (!docPanel) return false;
-                const cargando = docPanel.querySelector('[class*="progressContainer"], .ms-Spinner');
-                if (cargando) return false;
-                const bloques = extraerBloquesDeDocumentPanel(docPanel);
-                if (bloques.length > 0) return true;
-                const regionesArchivo = docPanel.querySelectorAll('[role="region"][aria-label="Archivo"]');
-                if (regionesArchivo && regionesArchivo.length > 0) return false;
-                const editor = docPanel.querySelector('.bbml-editor, .ql-editor');
-                return !!(editor && texto(editor.textContent).length > 20);
-            }, 8000);
-
-            await dormir(350);
-        } else {
-            await esperarHasta(() => {
-                if (esVisorInteractivoUnity()) return true;
-                const v = visor();
-                return !!(
-                    v.bloquesDoc?.length ||
-                    v.enlaceDescargaPanel ||
-                    v.mediaPanel ||
-                    v.srcIframe
-                );
-            }, 1800);
-        }
-
-        verificarCancelacion();
-
-        if (esVisorInteractivoUnity() || visor().esInteractivoUnity || esUrlScormOInteractivo(visor().srcIframe)) {
-            uLog?.log?.push(`[UNITY/SCORM] Detectado en "${r.nombre}" -> Presionando la X de la esquina para salir`);
-            await cerrarVisor(uLog, uActiva, pcActivo);
-            return [{ omitidoInteractivo: true }];
-        }
-
-        const v = visor();
-
-        // 1. Bloques de archivo (Video + PDFs en Información de la Asignatura)
-        const bloquesExtraidos = extraerBloquesDeDocumentPanel(v.panel || document);
-        if (bloquesExtraidos.length) {
-            return bloquesExtraidos.map(b => ({
-                url: b.url,
-                nombre: b.nombreArchivoSugerido || b.nombre,
-                subCarpeta: b.nombre
-            }));
-        }
-
-        // 2. Enlaces directos en el panel
-        if (v.enlacesDescarga?.length) {
-            const items = v.enlacesDescarga
-                .map(el => ({
-                    url: urlReal(
-                        el.getAttribute('data-ally-file-preview-url') ||
-                        el.getAttribute('href') ||
-                        el.getAttribute('data-download-url')
-                    ),
-                    nombre: limpiarPrefijoXid(
-                        el.getAttribute('data-ally-file-eid') ||
-                        el.getAttribute('download') ||
-                        r.nombre
-                    )
-                }))
-                .filter(x => x.url);
-
-            if (items.length) return items;
-        }
-
-        const directo =
-            v.enlaceDescargaPanel?.getAttribute('data-ally-file-preview-url') ||
-            v.enlaceDescargaPanel?.getAttribute('href') ||
-            v.enlaceDescargaPanel?.getAttribute('data-download-url') ||
-            v.mediaPanel?.getAttribute('src');
-
-        if (directo && urlReal(directo)) {
-            return [{ url: urlReal(directo), nombre: r.nombre }];
-        }
-
-        const urlIframe = urlReal(v.srcIframe);
-        if (urlIframe) {
-            return [{ url: urlIframe, nombre: r.nombre }];
-        }
-
-        try {
-            const docIframe = v.iframe?.contentDocument;
-            if (docIframe) {
-                if (docIframe.querySelector('#unity-container, #unity-canvas, canvas[id*="unity" i]')) {
-                    uLog?.log?.push(`[UNITY/SCORM] Canvas Unity detectado en "${r.nombre}" -> Presionando la X`);
+                // Si se abrió un contenido interactivo tipo Unity WebGL / SCORM -> presionar la X de la esquina inmediatamente
+                if (esVisorInteractivoUnity() || visor().esInteractivoUnity || esUrlScormOInteractivo(visor().srcIframe)) {
+                    uLog?.log?.push(`[UNITY/SCORM] Detectado en "${r.nombre}" -> Presionando la X de la esquina para salir`);
                     await cerrarVisor(uLog, uActiva, pcActivo);
                     return [{ omitidoInteractivo: true }];
                 }
 
-                const internos = [
-                    ...docIframe.querySelectorAll(
-                        'a[download], a[href*="bbcswebdav"], audio[src], video[src], source[src], embed[src]'
-                    )
-                ]
-                    .map(el => ({
-                        url: urlReal(el.getAttribute('href') || el.getAttribute('src'), location.href),
-                        nombre: r.nombre
-                    }))
-                    .filter(x => x.url);
+                if (!valido && ultimaUrlIframeInterceptada) {
+                    return [{ url: ultimaUrlIframeInterceptada, nombre: r.nombre }];
+                }
 
-                if (internos.length) {
-                    return internos;
+                if (!valido) {
+                    throw new Error('Blackboard no abrió el visor de descarga');
+                }
+
+                if (ultimaUrlIframeInterceptada && !visor().abierto && !enVistaDocumentoPantallaCompleta()) {
+                    return [{ url: ultimaUrlIframeInterceptada, nombre: r.nombre }];
+                }
+
+                if (visor().esFullDocument || enVistaDocumentoPantallaCompleta() || r.esDocUltra) {
+                    await esperarHasta(() => {
+                        if (esVisorInteractivoUnity()) return true;
+                        const docPanel = document.querySelector('document-panel') || visor().panel;
+                        if (!docPanel) return false;
+                        const cargando = docPanel.querySelector('[class*="progressContainer"], .ms-Spinner');
+                        if (cargando) return false;
+                        const bloques = extraerBloquesDeDocumentPanel(docPanel);
+                        if (bloques.length > 0) return true;
+                        const regionesArchivo = docPanel.querySelectorAll('[role="region"][aria-label="Archivo"]');
+                        if (regionesArchivo && regionesArchivo.length > 0) return false;
+                        if (visor().enlacesDescarga?.length) return true;
+                        const editor = docPanel.querySelector('.bbml-editor, .ql-editor');
+                        return !!(editor && texto(editor.textContent).length > 20);
+                    }, 8000);
+
+                    await dormir(100);
+                } else {
+                    await esperarHasta(() => {
+                        if (esVisorInteractivoUnity()) return true;
+                        const v = visor();
+                        return !!(
+                            v.bloquesDoc?.length ||
+                            v.enlaceDescargaPanel ||
+                            v.mediaPanel ||
+                            v.srcIframe
+                        );
+                    }, 1800);
+                }
+
+                verificarCancelacion();
+
+                if (esVisorInteractivoUnity() || visor().esInteractivoUnity || esUrlScormOInteractivo(visor().srcIframe)) {
+                    uLog?.log?.push(`[UNITY/SCORM] Detectado en "${r.nombre}" -> Presionando la X de la esquina para salir`);
+                    await cerrarVisor(uLog, uActiva, pcActivo);
+                    return [{ omitidoInteractivo: true }];
+                }
+
+                const v = visor();
+
+                // 1. Bloques de archivo (Video + PDFs en Información de la Asignatura)
+                const bloquesExtraidos = extraerBloquesDeDocumentPanel(v.panel || document);
+                if (bloquesExtraidos.length) {
+                    return bloquesExtraidos.map(b => ({
+                        url: b.url,
+                        nombre: b.nombreArchivoSugerido || b.nombre,
+                        subCarpeta: b.nombre
+                    }));
+                }
+
+                // 2. Enlaces directos en el panel
+                if (v.enlacesDescarga?.length) {
+                    const items = v.enlacesDescarga
+                        .map(el => ({
+                            url: urlReal(
+                                el.getAttribute('data-ally-file-preview-url') ||
+                                el.getAttribute('href') ||
+                                el.getAttribute('data-download-url')
+                            ),
+                            nombre: limpiarPrefijoXid(
+                                el.getAttribute('data-ally-file-eid') ||
+                                el.getAttribute('download') ||
+                                r.nombre
+                            )
+                        }))
+                        .filter(x => x.url);
+
+                    if (items.length) return items;
+                }
+
+                const directo =
+                    v.enlaceDescargaPanel?.getAttribute('data-ally-file-preview-url') ||
+                    v.enlaceDescargaPanel?.getAttribute('href') ||
+                    v.enlaceDescargaPanel?.getAttribute('data-download-url') ||
+                    v.mediaPanel?.getAttribute('src');
+
+                if (directo && urlReal(directo)) {
+                    return [{ url: urlReal(directo), nombre: r.nombre }];
+                }
+
+                const urlIframe = urlReal(v.srcIframe);
+                if (urlIframe) {
+                    return [{ url: urlIframe, nombre: r.nombre }];
+                }
+
+                try {
+                    const docIframe = v.iframe?.contentDocument;
+                    if (docIframe) {
+                        if (docIframe.querySelector('#unity-container, #unity-canvas, canvas[id*="unity" i]')) {
+                            uLog?.log?.push(`[UNITY/SCORM] Canvas Unity detectado en "${r.nombre}" -> Presionando la X`);
+                            await cerrarVisor(uLog, uActiva, pcActivo);
+                            return [{ omitidoInteractivo: true }];
+                        }
+
+                        const internos = [
+                            ...docIframe.querySelectorAll(
+                                'a[download], a[href*="bbcswebdav"], audio[src], video[src], source[src], embed[src]'
+                            )
+                        ]
+                            .map(el => ({
+                                url: urlReal(el.getAttribute('href') || el.getAttribute('src'), location.href),
+                                nombre: r.nombre
+                            }))
+                            .filter(x => x.url);
+
+                        if (internos.length) {
+                            return internos;
+                        }
+                    }
+                } catch {
+                    // Iframe cross-origin
+                }
+
+                // 3. Documento de texto sin adjuntos (ej. Resumen de la asignatura)
+                const contenedorTexto = v.panel || document.querySelector('document-panel');
+                if (contenedorTexto) {
+                    const parrafos = [...contenedorTexto.querySelectorAll('.ql-editor, .bbml-editor')]
+                        .map(ed => (ed.innerText || ed.textContent || '').trim())
+                        .filter(Boolean)
+                        .join('\r\n\r\n');
+
+                    const contenidoTxt =
+                        parrafos ||
+                        texto(v.cuerpoDocumento?.innerText || v.cuerpoDocumento?.textContent || '');
+                    if (contenidoTxt && contenidoTxt.length > 5) {
+                        return [{ textoPlano: contenidoTxt }];
+                    }
+                }
+
+                throw new Error('El visor no tiene archivo descargable');
+            } finally {
+                if (visor().abierto || visor().esFullDocument || enVistaDocumentoPantallaCompleta()) {
+                    await cerrarVisor(uLog, uActiva, pcActivo);
                 }
             }
-        } catch {
-            // Iframe cross-origin
-        }
-
-        // 3. Documento de texto sin adjuntos (ej. Resumen de la asignatura)
-        const contenedorTexto = v.panel || document.querySelector('document-panel');
-        if (contenedorTexto) {
-            const parrafos = [...contenedorTexto.querySelectorAll('.ql-editor, .bbml-editor')]
-                .map(ed => (ed.innerText || ed.textContent || '').trim())
-                .filter(Boolean)
-                .join('\r\n\r\n');
-
-            const contenidoTxt =
-                parrafos ||
-                texto(v.cuerpoDocumento?.innerText || v.cuerpoDocumento?.textContent || '');
-            if (contenidoTxt && contenidoTxt.length > 5) {
-                return [{ textoPlano: contenidoTxt }];
-            }
-        }
-
-        throw new Error('El visor no tiene archivo descargable');
+        });
     }
 
     // ==================================================
@@ -5451,14 +5576,28 @@
     // PROCESAR UN RECURSO INDIVIDUAL (CON SUB-CARPETA POR ITEM)
     // ==================================================
 
-    async function procesarRecursoItem(r, uLog, zip, carpetaBase, uActiva = null, pcActivo = null) {
+    async function procesarRecursoItem(
+        r,
+        uLog,
+        zip,
+        carpetaBase,
+        uActiva = null,
+        pcActivo = null,
+        opts = {}
+    ) {
         verificarCancelacion();
 
         const ruta = r.ruta.join(' / ');
+        const agregarLog = linea => {
+            if (opts.logs) opts.logs.push(linea);
+            else uLog?.log?.push(linea);
+        };
+        const receptorLogVisor = { log: { push: linea => agregarLog(linea) } };
+
         let resultado = { archivos: [], errores: [] };
         let fallo = '';
 
-        if (r.url) {
+        if (r.url && !r.esDocUltra && !esRutaSpaBlackboard(r.url)) {
             try {
                 resultado = await recuperar(
                     r.url,
@@ -5477,46 +5616,57 @@
 
         if (!resultado.archivos.length && !esEnlaceExternoDirecto) {
             try {
-                const capturados = await capturarClic(r, uLog, uActiva, pcActivo);
-
-                if (visor().abierto || visor().esFullDocument || enVistaDocumentoPantallaCompleta()) {
-                    await cerrarVisor(uLog, uActiva, pcActivo);
-                }
+                const capturados = await capturarClic(r, receptorLogVisor, uActiva, pcActivo);
 
                 if (capturados.some(c => c?.omitidoInteractivo)) {
                     return { omitidoInteractivo: true, guardados: [], errores: [] };
                 }
 
-                for (const itemCap of capturados) {
-                    verificarCancelacion();
+                const bloques = await ejecutarPool(
+                    capturados,
+                    Math.min(CFG.CONCURRENCIA, capturados.length),
+                    async itemCap => {
+                        verificarCancelacion();
 
-                    if (typeof itemCap === 'string') {
-                        uLog.log.push(`[VISOR] ${ruta} -> ${itemCap}`);
-                        const rec = await recuperar(itemCap, r.nombre);
-                        resultado.archivos.push(...rec.archivos);
-                        resultado.errores.push(...rec.errores);
-                    } else if (itemCap?.url) {
-                        const etiquetaSub = itemCap.subCarpeta || itemCap.nombre || r.nombre;
-                        if (uActiva) {
-                            progreso(uActiva, 0, 1, `Descargando (${r.nombre}): ${etiquetaSub}...`);
+                        if (typeof itemCap === 'string') {
+                            agregarLog(`[VISOR] ${ruta} -> ${itemCap}`);
+                            return recuperar(itemCap, r.nombre);
                         }
-                        uLog.log.push(`[VISOR] ${ruta} (${etiquetaSub}) -> ${itemCap.url}`);
-                        const rec = await recuperar(
-                            itemCap.url,
-                            itemCap.nombre || r.nombre,
-                            0,
-                            new Set(),
-                            itemCap.subCarpeta || ''
-                        );
-                        resultado.archivos.push(...rec.archivos);
-                        resultado.errores.push(...rec.errores);
-                    } else if (itemCap?.textoPlano) {
-                        resultado.archivos.push({
-                            nombre: `${seguro(r.nombre)}.txt`,
-                            bytes: new TextEncoder().encode(itemCap.textoPlano),
-                            subCarpeta: ''
-                        });
+                        if (itemCap?.url) {
+                            const etiquetaSub = itemCap.subCarpeta || itemCap.nombre || r.nombre;
+                            if (uActiva && !opts.silenciarProgreso) {
+                                progreso(uActiva, 0, 1, `Descargando (${r.nombre}): ${etiquetaSub}...`);
+                            }
+                            agregarLog(`[VISOR] ${ruta} (${etiquetaSub}) -> ${itemCap.url}`);
+                            return recuperar(
+                                itemCap.url,
+                                itemCap.nombre || r.nombre,
+                                0,
+                                new Set(),
+                                itemCap.subCarpeta || ''
+                            );
+                        }
+                        if (itemCap?.textoPlano) {
+                            return {
+                                archivos: [
+                                    {
+                                        nombre: `${seguro(r.nombre)}.txt`,
+                                        bytes: new TextEncoder().encode(itemCap.textoPlano),
+                                        subCarpeta: ''
+                                    }
+                                ],
+                                errores: []
+                            };
+                        }
+                        return { archivos: [], errores: [] };
                     }
+                );
+
+                verificarCancelacion();
+                for (const rec of bloques) {
+                    if (!rec) continue;
+                    resultado.archivos.push(...rec.archivos);
+                    resultado.errores.push(...rec.errores);
                 }
 
                 if (!resultado.archivos.length) {
@@ -5614,22 +5764,24 @@
 
             const zip = crearZipNativo();
             const carpetaRaiz = seguro(u.nombre);
-            const archivosParaMapa = [];
+            const logsPorItem = items.map(() => []);
+            const mapaPorItem = items.map(() => []);
+            let completados = 0;
 
-            for (let i = 0; i < items.length; i++) {
+            await ejecutarPool(items, CFG.CONCURRENCIA, async (r, i) => {
                 verificarCancelacion();
 
-                const r = items[i];
                 const ruta = r.ruta.join(' / ');
+                const logsItem = logsPorItem[i];
+                const mapaItem = mapaPorItem[i];
 
                 pieza(u, i, 'procesando', r.nombre);
-                progreso(u, i, items.length, `Descargando: ${r.nombre}`);
 
                 if (r.omitido) {
                     omitidos++;
                     pieza(u, i, 'omitido', r.nombre);
                     colorear(r, 'omitido', 'Material interactivo / SCORM omitido');
-                    u.log.push(`[OMITIDO] ${ruta}`);
+                    logsItem.push(`[OMITIDO] ${ruta}`);
                 } else {
                     try {
                         const { omitidoInteractivo, guardados, errores: errParciales } = await procesarRecursoItem(
@@ -5638,14 +5790,15 @@
                             zip,
                             carpetaRaiz,
                             u,
-                            null
+                            null,
+                            { logs: logsItem, silenciarProgreso: true }
                         );
 
                         if (omitidoInteractivo) {
                             omitidos++;
                             pieza(u, i, 'omitido', r.nombre);
                             colorear(r, 'omitido', 'Contenido interactivo Unity / SCORM cerrado automáticamente');
-                            u.log.push(`[OMITIDO] ${ruta} (Contenido interactivo Unity / SCORM)`);
+                            logsItem.push(`[OMITIDO] ${ruta} (Contenido interactivo Unity / SCORM)`);
                         } else {
                             for (const g of guardados) {
                                 ok++;
@@ -5654,8 +5807,8 @@
                                     g.bytes.byteLength,
                                     g.etiqueta
                                 );
-                                archivosParaMapa.push({ ruta: g.rutaFinal, comentario });
-                                u.log.push(
+                                mapaItem.push({ ruta: g.rutaFinal, comentario });
+                                logsItem.push(
                                     `[OK] ${g.rutaFinal} (${(g.bytes.byteLength / 1024).toFixed(1)} KB)`
                                 );
                             }
@@ -5665,7 +5818,7 @@
                                 pieza(u, i, 'error', r.nombre);
                                 colorear(r, 'error', errParciales.join(' | '));
                                 errParciales.forEach(e =>
-                                    u.log.push(`[ERROR PARCIAL] ${ruta}: ${e}`)
+                                    logsItem.push(`[ERROR PARCIAL] ${ruta}: ${e}`)
                                 );
                             } else {
                                 pieza(u, i, 'ok', r.nombre);
@@ -5677,25 +5830,23 @@
                         errores++;
                         pieza(u, i, 'error', r.nombre);
                         colorear(r, 'error', e.message);
-                        u.log.push(`[ERROR] ${ruta}: ${e.message}`);
-                    } finally {
-                        if (visor().abierto || enVistaDocumentoPantallaCompleta()) {
-                            await cerrarVisor(u, u, null);
-                        }
+                        logsItem.push(`[ERROR] ${ruta}: ${e.message}`);
                     }
                 }
 
+                completados++;
                 progreso(
                     u,
-                    i + 1,
+                    completados,
                     items.length,
-                    `OK: ${ok} · Errores: ${errores} · Omitidos: ${omitidos}`
+                    `Descargando (${completados}/${items.length}) · OK: ${ok} · Errores: ${errores}`
                 );
-
-                await dormir(CFG.PAUSA);
-            }
+            });
 
             verificarCancelacion();
+
+            for (const logsItem of logsPorItem) u.log.push(...logsItem);
+            const archivosParaMapa = mapaPorItem.flat();
 
             archivosParaMapa.push({
                 ruta: `${carpetaRaiz}/_REPORTE.txt`,
@@ -5719,7 +5870,7 @@
 
             u.pct.textContent = '99%';
             u.estado.textContent = 'Empaquetando archivo .zip...';
-            await dormir(20);
+            await dormir(10);
 
             const blob = zip.generarBlob();
 
@@ -5824,22 +5975,34 @@
                 throw new Error('No se encontraron unidades habilitadas en el curso');
             }
 
+            let unidadesAbiertas = 0;
+            progreso(pc, 0, listaUnidades.length, `Abriendo ${listaUnidades.length} unidades...`);
+
+            const itemsPorUnidad = await ejecutarPool(
+                listaUnidades,
+                CFG.CONCURRENCIA_UNIDADES,
+                async u => {
+                    verificarCancelacion();
+                    u.log = [];
+                    await expandirCarpetas(u);
+                    verificarCancelacion();
+                    const itemsUnidad = recursos(u);
+                    unidadesAbiertas++;
+                    progreso(
+                        pc,
+                        unidadesAbiertas,
+                        listaUnidades.length,
+                        `Escaneadas (${unidadesAbiertas}/${listaUnidades.length}): ${u.nombre}`
+                    );
+                    return itemsUnidad;
+                }
+            );
+
+            verificarCancelacion();
+
             const colaGlobal = [];
-
-            for (let idx = 0; idx < listaUnidades.length; idx++) {
-                verificarCancelacion();
-
-                const u = listaUnidades[idx];
-                progreso(
-                    pc,
-                    idx,
-                    listaUnidades.length,
-                    `Abriendo (${idx + 1}/${listaUnidades.length}): ${u.nombre}...`
-                );
-                u.log = [];
-                await expandirCarpetas(u);
-
-                const itemsUnidad = recursos(u);
+            listaUnidades.forEach((u, idx) => {
+                const itemsUnidad = itemsPorUnidad[idx] || [];
                 if (itemsUnidad.length) {
                     crearPiezas(u, itemsUnidad);
                     itemsUnidad.forEach((item, localIdx) => {
@@ -5852,7 +6015,7 @@
                         });
                     });
                 }
-            }
+            });
 
             if (!colaGlobal.length) {
                 throw new Error('No se detectaron recursos descargables en el curso');
@@ -5862,108 +6025,110 @@
 
             const zip = crearZipNativo();
             const carpetaCurso = seguro(nombreCurso);
-            const archivosParaMapa = [];
+            const logsPorItem = colaGlobal.map(() => []);
+            const mapaPorItem = colaGlobal.map(() => []);
+            const completadosPorUnidad = new Map();
+            let completadosGlobal = 0;
 
-            for (let i = 0; i < colaGlobal.length; i++) {
-                verificarCancelacion();
+            await ejecutarPool(
+                colaGlobal,
+                CFG.CONCURRENCIA,
+                async ({ u, item: r, localIdx, totalUnidad }, i) => {
+                    verificarCancelacion();
 
-                const { u, item: r, localIdx, totalUnidad } = colaGlobal[i];
-                const carpetaUnidad = `${carpetaCurso}/${seguro(u.nombre)}`;
-                const rutaLog = `${seguro(u.nombre)} / ${r.ruta.join(' / ')}`;
+                    const carpetaUnidad = `${carpetaCurso}/${seguro(u.nombre)}`;
+                    const rutaLog = `${seguro(u.nombre)} / ${r.ruta.join(' / ')}`;
+                    const logsItem = logsPorItem[i];
+                    const mapaItem = mapaPorItem[i];
 
-                pieza(pc, i, 'procesando', `${u.nombre}: ${r.nombre}`);
-                pieza(u, localIdx, 'procesando', r.nombre);
+                    pieza(pc, i, 'procesando', `${u.nombre}: ${r.nombre}`);
+                    pieza(u, localIdx, 'procesando', r.nombre);
 
-                progreso(
-                    pc,
-                    i,
-                    colaGlobal.length,
-                    `[${u.nombre}] Descargando: ${r.nombre}`
-                );
-                progreso(u, localIdx, totalUnidad, `Descargando: ${r.nombre}`);
+                    if (r.omitido) {
+                        omitidos++;
+                        pieza(pc, i, 'omitido', `${u.nombre}: ${r.nombre}`);
+                        pieza(u, localIdx, 'omitido', r.nombre);
+                        colorear(r, 'omitido', 'Material interactivo / SCORM omitido');
+                        logsItem.push(`[OMITIDO] ${rutaLog}`);
+                    } else {
+                        try {
+                            const { omitidoInteractivo, guardados, errores: errParciales } = await procesarRecursoItem(
+                                r,
+                                pc,
+                                zip,
+                                carpetaUnidad,
+                                u,
+                                pc,
+                                { logs: logsItem, silenciarProgreso: true }
+                            );
 
-                if (r.omitido) {
-                    omitidos++;
-                    pieza(pc, i, 'omitido', `${u.nombre}: ${r.nombre}`);
-                    pieza(u, localIdx, 'omitido', r.nombre);
-                    colorear(r, 'omitido', 'Material interactivo / SCORM omitido');
-                    pc.log.push(`[OMITIDO] ${rutaLog}`);
-                } else {
-                    try {
-                        const { omitidoInteractivo, guardados, errores: errParciales } = await procesarRecursoItem(
-                            r,
-                            pc,
-                            zip,
-                            carpetaUnidad,
-                            u,
-                            pc
-                        );
-
-                        if (omitidoInteractivo) {
-                            omitidos++;
-                            pieza(pc, i, 'omitido', `${u.nombre}: ${r.nombre}`);
-                            pieza(u, localIdx, 'omitido', r.nombre);
-                            colorear(r, 'omitido', 'Contenido interactivo Unity / SCORM cerrado automáticamente');
-                            pc.log.push(`[OMITIDO] ${rutaLog} (Contenido interactivo Unity / SCORM)`);
-                        } else {
-                            for (const g of guardados) {
-                                ok++;
-                                const comentario = describirArchivo(
-                                    g.rutaFinal.split('/').pop(),
-                                    g.bytes.byteLength,
-                                    g.etiqueta
-                                );
-                                archivosParaMapa.push({ ruta: g.rutaFinal, comentario });
-                                pc.log.push(
-                                    `[OK] ${g.rutaFinal} (${(g.bytes.byteLength / 1024).toFixed(1)} KB)`
-                                );
-                            }
-
-                            if (errParciales.length) {
-                                errores += errParciales.length;
-                                pieza(pc, i, 'error', `${u.nombre}: ${r.nombre}`);
-                                pieza(u, localIdx, 'error', r.nombre);
-                                colorear(r, 'error', errParciales.join(' | '));
-                                errParciales.forEach(e =>
-                                    pc.log.push(`[ERROR PARCIAL] ${rutaLog}: ${e}`)
-                                );
+                            if (omitidoInteractivo) {
+                                omitidos++;
+                                pieza(pc, i, 'omitido', `${u.nombre}: ${r.nombre}`);
+                                pieza(u, localIdx, 'omitido', r.nombre);
+                                colorear(r, 'omitido', 'Contenido interactivo Unity / SCORM cerrado automáticamente');
+                                logsItem.push(`[OMITIDO] ${rutaLog} (Contenido interactivo Unity / SCORM)`);
                             } else {
-                                pieza(pc, i, 'ok', `${u.nombre}: ${r.nombre}`);
-                                pieza(u, localIdx, 'ok', r.nombre);
-                                colorear(r, 'ok', 'Archivo añadido al ZIP del curso');
+                                for (const g of guardados) {
+                                    ok++;
+                                    const comentario = describirArchivo(
+                                        g.rutaFinal.split('/').pop(),
+                                        g.bytes.byteLength,
+                                        g.etiqueta
+                                    );
+                                    mapaItem.push({ ruta: g.rutaFinal, comentario });
+                                    logsItem.push(
+                                        `[OK] ${g.rutaFinal} (${(g.bytes.byteLength / 1024).toFixed(1)} KB)`
+                                    );
+                                }
+
+                                if (errParciales.length) {
+                                    errores += errParciales.length;
+                                    pieza(pc, i, 'error', `${u.nombre}: ${r.nombre}`);
+                                    pieza(u, localIdx, 'error', r.nombre);
+                                    colorear(r, 'error', errParciales.join(' | '));
+                                    errParciales.forEach(e =>
+                                        logsItem.push(`[ERROR PARCIAL] ${rutaLog}: ${e}`)
+                                    );
+                                } else {
+                                    pieza(pc, i, 'ok', `${u.nombre}: ${r.nombre}`);
+                                    pieza(u, localIdx, 'ok', r.nombre);
+                                    colorear(r, 'ok', 'Archivo añadido al ZIP del curso');
+                                }
                             }
-                        }
-                    } catch (e) {
-                        if (e.esCancelacion || cancelado) throw e;
-                        errores++;
-                        pieza(pc, i, 'error', `${u.nombre}: ${r.nombre}`);
-                        pieza(u, localIdx, 'error', r.nombre);
-                        colorear(r, 'error', e.message);
-                        pc.log.push(`[ERROR] ${rutaLog}: ${e.message}`);
-                    } finally {
-                        if (visor().abierto || enVistaDocumentoPantallaCompleta()) {
-                            await cerrarVisor(pc, u, pc);
+                        } catch (e) {
+                            if (e.esCancelacion || cancelado) throw e;
+                            errores++;
+                            pieza(pc, i, 'error', `${u.nombre}: ${r.nombre}`);
+                            pieza(u, localIdx, 'error', r.nombre);
+                            colorear(r, 'error', e.message);
+                            logsItem.push(`[ERROR] ${rutaLog}: ${e.message}`);
                         }
                     }
+
+                    completadosGlobal++;
+                    const compU = (completadosPorUnidad.get(u) || 0) + 1;
+                    completadosPorUnidad.set(u, compU);
+
+                    progreso(
+                        pc,
+                        completadosGlobal,
+                        colaGlobal.length,
+                        `Curso (${completadosGlobal}/${colaGlobal.length}) · OK: ${ok} · Errores: ${errores}`
+                    );
+                    progreso(
+                        u,
+                        compU,
+                        totalUnidad,
+                        compU >= totalUnidad ? 'Incluido en el ZIP del curso' : `Incluido (${compU}/${totalUnidad})`
+                    );
                 }
-
-                progreso(
-                    pc,
-                    i + 1,
-                    colaGlobal.length,
-                    `Curso · OK: ${ok} · Errores: ${errores} · Omitidos: ${omitidos}`
-                );
-                progreso(
-                    u,
-                    localIdx + 1,
-                    totalUnidad,
-                    'Incluido en el ZIP del curso'
-                );
-
-                await dormir(CFG.PAUSA);
-            }
+            );
 
             verificarCancelacion();
+
+            for (const logsItem of logsPorItem) pc.log.push(...logsItem);
+            const archivosParaMapa = mapaPorItem.flat();
 
             archivosParaMapa.push({
                 ruta: `${carpetaCurso}/_REPORTE_CURSO.txt`,
@@ -5987,7 +6152,7 @@
 
             pc.pct.textContent = '99%';
             pc.estado.textContent = 'Empaquetando curso completo en .zip...';
-            await dormir(20);
+            await dormir(10);
 
             const blob = zip.generarBlob();
 

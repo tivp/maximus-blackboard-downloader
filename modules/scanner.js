@@ -387,6 +387,10 @@ export async function abrirUnidad(u) {
             )
         ].some(x => x !== u.titulo && dentroDeUnidad(x, u));
 
+    if (control?.getAttribute('aria-expanded') !== 'false' && hayContenidoDescargable()) {
+        return;
+    }
+
     if (
         control?.getAttribute('aria-expanded') === 'false' ||
         (!hayContenidoDescargable() && control)
@@ -396,11 +400,13 @@ export async function abrirUnidad(u) {
             u.log.push('[UNIDAD] Abierta automáticamente');
         }
 
-        await esperarHasta(() => hayContenidoDescargable(), CFG.ESPERA_CARGA);
+        await esperarHasta(() => hayContenidoDescargable(), CFG.ESPERA_CARGA, 50);
     }
 
-    await esperarHasta(hayContenidoDescargable, 4000);
-    await dormir(350);
+    if (!hayContenidoDescargable()) {
+        await esperarHasta(hayContenidoDescargable, 4000, 50);
+    }
+    await dormir(80);
 }
 
 export async function expandirCarpetas(u) {
@@ -429,7 +435,7 @@ export async function expandirCarpetas(u) {
 
         if (!botones.length) break;
 
-        let abiertos = 0;
+        const pendientesEspera = [];
 
         for (const boton of botones) {
             verificarCancelacion();
@@ -444,24 +450,31 @@ export async function expandirCarpetas(u) {
 
             try {
                 boton.click();
-                abiertos++;
+                pendientesEspera.push({ boton, cardCarpeta, hijosAntes });
+            } catch (e) {
+                u.log.push(`[CARPETA] ${e.message}`);
+            }
+        }
 
-                await esperarHasta(
+        if (!pendientesEspera.length) break;
+
+        await Promise.all(
+            pendientesEspera.map(({ boton, cardCarpeta, hijosAntes }) =>
+                esperarHasta(
                     () =>
                         !boton.isConnected ||
                         (boton.getAttribute('aria-expanded') === 'true' &&
                             (!cardCarpeta ||
                                 (!cardCarpeta.querySelector('.ms-Spinner, [data-testid="skeleton-loader"]') &&
                                     cardCarpeta.querySelectorAll(TARJETAS).length > hijosAntes))),
-                    2800
-                );
-            } catch (e) {
-                u.log.push(`[CARPETA] ${e.message}`);
-            }
-        }
-
-        if (!abiertos) break;
-        await dormir(350);
+                    2500,
+                    50
+                ).catch(e => {
+                    u.log.push(`[CARPETA] ${e.message}`);
+                })
+            )
+        );
+        await dormir(80);
     }
 }
 

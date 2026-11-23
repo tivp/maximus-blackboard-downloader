@@ -7,7 +7,9 @@ import {
     seguro,
     posicion,
     esUrlExterna,
-    obtenerNombreCurso
+    esRutaSpaBlackboard,
+    obtenerNombreCurso,
+    ejecutarPool
 } from './utils.js';
 import {
     crearZipNativo,
@@ -35,14 +37,28 @@ export function registrarAgendador(fn) {
     fnAgendar = fn;
 }
 
-export async function procesarRecursoItem(r, uLog, zip, carpetaBase, uActiva = null, pcActivo = null) {
+export async function procesarRecursoItem(
+    r,
+    uLog,
+    zip,
+    carpetaBase,
+    uActiva = null,
+    pcActivo = null,
+    opts = {}
+) {
     verificarCancelacion();
 
     const ruta = r.ruta.join(' / ');
+    const agregarLog = linea => {
+        if (opts.logs) opts.logs.push(linea);
+        else uLog?.log?.push(linea);
+    };
+    const receptorLogVisor = { log: { push: linea => agregarLog(linea) } };
+
     let resultado = { archivos: [], errores: [] };
     let fallo = '';
 
-    if (r.url) {
+    if (r.url && !r.esDocUltra && !esRutaSpaBlackboard(r.url)) {
         try {
             resultado = await recuperar(
                 r.url,
@@ -61,46 +77,57 @@ export async function procesarRecursoItem(r, uLog, zip, carpetaBase, uActiva = n
 
     if (!resultado.archivos.length && !esEnlaceExternoDirecto) {
         try {
-            const capturados = await capturarClic(r, uLog, uActiva, pcActivo);
-
-            if (visor().abierto || visor().esFullDocument || enVistaDocumentoPantallaCompleta()) {
-                await cerrarVisor(uLog, uActiva, pcActivo);
-            }
+            const capturados = await capturarClic(r, receptorLogVisor, uActiva, pcActivo);
 
             if (capturados.some(c => c?.omitidoInteractivo)) {
                 return { omitidoInteractivo: true, guardados: [], errores: [] };
             }
 
-            for (const itemCap of capturados) {
-                verificarCancelacion();
+            const bloques = await ejecutarPool(
+                capturados,
+                Math.min(CFG.CONCURRENCIA, capturados.length),
+                async itemCap => {
+                    verificarCancelacion();
 
-                if (typeof itemCap === 'string') {
-                    uLog.log.push(`[VISOR] ${ruta} -> ${itemCap}`);
-                    const rec = await recuperar(itemCap, r.nombre);
-                    resultado.archivos.push(...rec.archivos);
-                    resultado.errores.push(...rec.errores);
-                } else if (itemCap?.url) {
-                    const etiquetaSub = itemCap.subCarpeta || itemCap.nombre || r.nombre;
-                    if (uActiva) {
-                        progreso(uActiva, 0, 1, `Descargando (${r.nombre}): ${etiquetaSub}...`);
+                    if (typeof itemCap === 'string') {
+                        agregarLog(`[VISOR] ${ruta} -> ${itemCap}`);
+                        return recuperar(itemCap, r.nombre);
                     }
-                    uLog.log.push(`[VISOR] ${ruta} (${etiquetaSub}) -> ${itemCap.url}`);
-                    const rec = await recuperar(
-                        itemCap.url,
-                        itemCap.nombre || r.nombre,
-                        0,
-                        new Set(),
-                        itemCap.subCarpeta || ''
-                    );
-                    resultado.archivos.push(...rec.archivos);
-                    resultado.errores.push(...rec.errores);
-                } else if (itemCap?.textoPlano) {
-                    resultado.archivos.push({
-                        nombre: `${seguro(r.nombre)}.txt`,
-                        bytes: new TextEncoder().encode(itemCap.textoPlano),
-                        subCarpeta: ''
-                    });
+                    if (itemCap?.url) {
+                        const etiquetaSub = itemCap.subCarpeta || itemCap.nombre || r.nombre;
+                        if (uActiva && !opts.silenciarProgreso) {
+                            progreso(uActiva, 0, 1, `Descargando (${r.nombre}): ${etiquetaSub}...`);
+                        }
+                        agregarLog(`[VISOR] ${ruta} (${etiquetaSub}) -> ${itemCap.url}`);
+                        return recuperar(
+                            itemCap.url,
+                            itemCap.nombre || r.nombre,
+                            0,
+                            new Set(),
+                            itemCap.subCarpeta || ''
+                        );
+                    }
+                    if (itemCap?.textoPlano) {
+                        return {
+                            archivos: [
+                                {
+                                    nombre: `${seguro(r.nombre)}.txt`,
+                                    bytes: new TextEncoder().encode(itemCap.textoPlano),
+                                    subCarpeta: ''
+                                }
+                            ],
+                            errores: []
+                        };
+                    }
+                    return { archivos: [], errores: [] };
                 }
+            );
+
+            verificarCancelacion();
+            for (const rec of bloques) {
+                if (!rec) continue;
+                resultado.archivos.push(...rec.archivos);
+                resultado.errores.push(...rec.errores);
             }
 
             if (!resultado.archivos.length) {
@@ -193,22 +220,24 @@ export async function ejecutar(u) {
 
         const zip = crearZipNativo();
         const carpetaRaiz = seguro(u.nombre);
-        const archivosParaMapa = [];
+        const logsPorItem = items.map(() => []);
+        const mapaPorItem = items.map(() => []);
+        let completados = 0;
 
-        for (let i = 0; i < items.length; i++) {
+        await ejecutarPool(items, CFG.CONCURRENCIA, async (r, i) => {
             verificarCancelacion();
 
-            const r = items[i];
             const ruta = r.ruta.join(' / ');
+            const logsItem = logsPorItem[i];
+            const mapaItem = mapaPorItem[i];
 
             pieza(u, i, 'procesando', r.nombre);
-            progreso(u, i, items.length, `Descargando: ${r.nombre}`);
 
             if (r.omitido) {
                 omitidos++;
                 pieza(u, i, 'omitido', r.nombre);
                 colorear(r, 'omitido', 'Material interactivo / SCORM omitido');
-                u.log.push(`[OMITIDO] ${ruta}`);
+                logsItem.push(`[OMITIDO] ${ruta}`);
             } else {
                 try {
                     const { omitidoInteractivo, guardados, errores: errParciales } = await procesarRecursoItem(
@@ -217,14 +246,15 @@ export async function ejecutar(u) {
                         zip,
                         carpetaRaiz,
                         u,
-                        null
+                        null,
+                        { logs: logsItem, silenciarProgreso: true }
                     );
 
                     if (omitidoInteractivo) {
                         omitidos++;
                         pieza(u, i, 'omitido', r.nombre);
                         colorear(r, 'omitido', 'Contenido interactivo Unity / SCORM cerrado automáticamente');
-                        u.log.push(`[OMITIDO] ${ruta} (Contenido interactivo Unity / SCORM)`);
+                        logsItem.push(`[OMITIDO] ${ruta} (Contenido interactivo Unity / SCORM)`);
                     } else {
                         for (const g of guardados) {
                             ok++;
@@ -233,8 +263,8 @@ export async function ejecutar(u) {
                                 g.bytes.byteLength,
                                 g.etiqueta
                             );
-                            archivosParaMapa.push({ ruta: g.rutaFinal, comentario });
-                            u.log.push(
+                            mapaItem.push({ ruta: g.rutaFinal, comentario });
+                            logsItem.push(
                                 `[OK] ${g.rutaFinal} (${(g.bytes.byteLength / 1024).toFixed(1)} KB)`
                             );
                         }
@@ -244,7 +274,7 @@ export async function ejecutar(u) {
                             pieza(u, i, 'error', r.nombre);
                             colorear(r, 'error', errParciales.join(' | '));
                             errParciales.forEach(e =>
-                                u.log.push(`[ERROR PARCIAL] ${ruta}: ${e}`)
+                                logsItem.push(`[ERROR PARCIAL] ${ruta}: ${e}`)
                             );
                         } else {
                             pieza(u, i, 'ok', r.nombre);
@@ -256,25 +286,23 @@ export async function ejecutar(u) {
                     errores++;
                     pieza(u, i, 'error', r.nombre);
                     colorear(r, 'error', e.message);
-                    u.log.push(`[ERROR] ${ruta}: ${e.message}`);
-                } finally {
-                    if (visor().abierto || enVistaDocumentoPantallaCompleta()) {
-                        await cerrarVisor(u, u, null);
-                    }
+                    logsItem.push(`[ERROR] ${ruta}: ${e.message}`);
                 }
             }
 
+            completados++;
             progreso(
                 u,
-                i + 1,
+                completados,
                 items.length,
-                `OK: ${ok} · Errores: ${errores} · Omitidos: ${omitidos}`
+                `Descargando (${completados}/${items.length}) · OK: ${ok} · Errores: ${errores}`
             );
-
-            await dormir(CFG.PAUSA);
-        }
+        });
 
         verificarCancelacion();
+
+        for (const logsItem of logsPorItem) u.log.push(...logsItem);
+        const archivosParaMapa = mapaPorItem.flat();
 
         archivosParaMapa.push({
             ruta: `${carpetaRaiz}/_REPORTE.txt`,
@@ -298,7 +326,7 @@ export async function ejecutar(u) {
 
         u.pct.textContent = '99%';
         u.estado.textContent = 'Empaquetando archivo .zip...';
-        await dormir(20);
+        await dormir(10);
 
         const blob = zip.generarBlob();
 
@@ -398,22 +426,34 @@ export async function ejecutarTodoElCurso(pc) {
             throw new Error('No se encontraron unidades habilitadas en el curso');
         }
 
+        let unidadesAbiertas = 0;
+        progreso(pc, 0, listaUnidades.length, `Abriendo ${listaUnidades.length} unidades...`);
+
+        const itemsPorUnidad = await ejecutarPool(
+            listaUnidades,
+            CFG.CONCURRENCIA_UNIDADES,
+            async u => {
+                verificarCancelacion();
+                u.log = [];
+                await expandirCarpetas(u);
+                verificarCancelacion();
+                const itemsUnidad = recursos(u);
+                unidadesAbiertas++;
+                progreso(
+                    pc,
+                    unidadesAbiertas,
+                    listaUnidades.length,
+                    `Escaneadas (${unidadesAbiertas}/${listaUnidades.length}): ${u.nombre}`
+                );
+                return itemsUnidad;
+            }
+        );
+
+        verificarCancelacion();
+
         const colaGlobal = [];
-
-        for (let idx = 0; idx < listaUnidades.length; idx++) {
-            verificarCancelacion();
-
-            const u = listaUnidades[idx];
-            progreso(
-                pc,
-                idx,
-                listaUnidades.length,
-                `Abriendo (${idx + 1}/${listaUnidades.length}): ${u.nombre}...`
-            );
-            u.log = [];
-            await expandirCarpetas(u);
-
-            const itemsUnidad = recursos(u);
+        listaUnidades.forEach((u, idx) => {
+            const itemsUnidad = itemsPorUnidad[idx] || [];
             if (itemsUnidad.length) {
                 crearPiezas(u, itemsUnidad);
                 itemsUnidad.forEach((item, localIdx) => {
@@ -426,7 +466,7 @@ export async function ejecutarTodoElCurso(pc) {
                     });
                 });
             }
-        }
+        });
 
         if (!colaGlobal.length) {
             throw new Error('No se detectaron recursos descargables en el curso');
@@ -436,108 +476,110 @@ export async function ejecutarTodoElCurso(pc) {
 
         const zip = crearZipNativo();
         const carpetaCurso = seguro(nombreCurso);
-        const archivosParaMapa = [];
+        const logsPorItem = colaGlobal.map(() => []);
+        const mapaPorItem = colaGlobal.map(() => []);
+        const completadosPorUnidad = new Map();
+        let completadosGlobal = 0;
 
-        for (let i = 0; i < colaGlobal.length; i++) {
-            verificarCancelacion();
+        await ejecutarPool(
+            colaGlobal,
+            CFG.CONCURRENCIA,
+            async ({ u, item: r, localIdx, totalUnidad }, i) => {
+                verificarCancelacion();
 
-            const { u, item: r, localIdx, totalUnidad } = colaGlobal[i];
-            const carpetaUnidad = `${carpetaCurso}/${seguro(u.nombre)}`;
-            const rutaLog = `${seguro(u.nombre)} / ${r.ruta.join(' / ')}`;
+                const carpetaUnidad = `${carpetaCurso}/${seguro(u.nombre)}`;
+                const rutaLog = `${seguro(u.nombre)} / ${r.ruta.join(' / ')}`;
+                const logsItem = logsPorItem[i];
+                const mapaItem = mapaPorItem[i];
 
-            pieza(pc, i, 'procesando', `${u.nombre}: ${r.nombre}`);
-            pieza(u, localIdx, 'procesando', r.nombre);
+                pieza(pc, i, 'procesando', `${u.nombre}: ${r.nombre}`);
+                pieza(u, localIdx, 'procesando', r.nombre);
 
-            progreso(
-                pc,
-                i,
-                colaGlobal.length,
-                `[${u.nombre}] Descargando: ${r.nombre}`
-            );
-            progreso(u, localIdx, totalUnidad, `Descargando: ${r.nombre}`);
+                if (r.omitido) {
+                    omitidos++;
+                    pieza(pc, i, 'omitido', `${u.nombre}: ${r.nombre}`);
+                    pieza(u, localIdx, 'omitido', r.nombre);
+                    colorear(r, 'omitido', 'Material interactivo / SCORM omitido');
+                    logsItem.push(`[OMITIDO] ${rutaLog}`);
+                } else {
+                    try {
+                        const { omitidoInteractivo, guardados, errores: errParciales } = await procesarRecursoItem(
+                            r,
+                            pc,
+                            zip,
+                            carpetaUnidad,
+                            u,
+                            pc,
+                            { logs: logsItem, silenciarProgreso: true }
+                        );
 
-            if (r.omitido) {
-                omitidos++;
-                pieza(pc, i, 'omitido', `${u.nombre}: ${r.nombre}`);
-                pieza(u, localIdx, 'omitido', r.nombre);
-                colorear(r, 'omitido', 'Material interactivo / SCORM omitido');
-                pc.log.push(`[OMITIDO] ${rutaLog}`);
-            } else {
-                try {
-                    const { omitidoInteractivo, guardados, errores: errParciales } = await procesarRecursoItem(
-                        r,
-                        pc,
-                        zip,
-                        carpetaUnidad,
-                        u,
-                        pc
-                    );
-
-                    if (omitidoInteractivo) {
-                        omitidos++;
-                        pieza(pc, i, 'omitido', `${u.nombre}: ${r.nombre}`);
-                        pieza(u, localIdx, 'omitido', r.nombre);
-                        colorear(r, 'omitido', 'Contenido interactivo Unity / SCORM cerrado automáticamente');
-                        pc.log.push(`[OMITIDO] ${rutaLog} (Contenido interactivo Unity / SCORM)`);
-                    } else {
-                        for (const g of guardados) {
-                            ok++;
-                            const comentario = describirArchivo(
-                                g.rutaFinal.split('/').pop(),
-                                g.bytes.byteLength,
-                                g.etiqueta
-                            );
-                            archivosParaMapa.push({ ruta: g.rutaFinal, comentario });
-                            pc.log.push(
-                                `[OK] ${g.rutaFinal} (${(g.bytes.byteLength / 1024).toFixed(1)} KB)`
-                            );
-                        }
-
-                        if (errParciales.length) {
-                            errores += errParciales.length;
-                            pieza(pc, i, 'error', `${u.nombre}: ${r.nombre}`);
-                            pieza(u, localIdx, 'error', r.nombre);
-                            colorear(r, 'error', errParciales.join(' | '));
-                            errParciales.forEach(e =>
-                                pc.log.push(`[ERROR PARCIAL] ${rutaLog}: ${e}`)
-                            );
+                        if (omitidoInteractivo) {
+                            omitidos++;
+                            pieza(pc, i, 'omitido', `${u.nombre}: ${r.nombre}`);
+                            pieza(u, localIdx, 'omitido', r.nombre);
+                            colorear(r, 'omitido', 'Contenido interactivo Unity / SCORM cerrado automáticamente');
+                            logsItem.push(`[OMITIDO] ${rutaLog} (Contenido interactivo Unity / SCORM)`);
                         } else {
-                            pieza(pc, i, 'ok', `${u.nombre}: ${r.nombre}`);
-                            pieza(u, localIdx, 'ok', r.nombre);
-                            colorear(r, 'ok', 'Archivo añadido al ZIP del curso');
+                            for (const g of guardados) {
+                                ok++;
+                                const comentario = describirArchivo(
+                                    g.rutaFinal.split('/').pop(),
+                                    g.bytes.byteLength,
+                                    g.etiqueta
+                                );
+                                mapaItem.push({ ruta: g.rutaFinal, comentario });
+                                logsItem.push(
+                                    `[OK] ${g.rutaFinal} (${(g.bytes.byteLength / 1024).toFixed(1)} KB)`
+                                );
+                            }
+
+                            if (errParciales.length) {
+                                errores += errParciales.length;
+                                pieza(pc, i, 'error', `${u.nombre}: ${r.nombre}`);
+                                pieza(u, localIdx, 'error', r.nombre);
+                                colorear(r, 'error', errParciales.join(' | '));
+                                errParciales.forEach(e =>
+                                    logsItem.push(`[ERROR PARCIAL] ${rutaLog}: ${e}`)
+                                );
+                            } else {
+                                pieza(pc, i, 'ok', `${u.nombre}: ${r.nombre}`);
+                                pieza(u, localIdx, 'ok', r.nombre);
+                                colorear(r, 'ok', 'Archivo añadido al ZIP del curso');
+                            }
                         }
-                    }
-                } catch (e) {
-                    if (e.esCancelacion || estado.cancelado) throw e;
-                    errores++;
-                    pieza(pc, i, 'error', `${u.nombre}: ${r.nombre}`);
-                    pieza(u, localIdx, 'error', r.nombre);
-                    colorear(r, 'error', e.message);
-                    pc.log.push(`[ERROR] ${rutaLog}: ${e.message}`);
-                } finally {
-                    if (visor().abierto || enVistaDocumentoPantallaCompleta()) {
-                        await cerrarVisor(pc, u, pc);
+                    } catch (e) {
+                        if (e.esCancelacion || estado.cancelado) throw e;
+                        errores++;
+                        pieza(pc, i, 'error', `${u.nombre}: ${r.nombre}`);
+                        pieza(u, localIdx, 'error', r.nombre);
+                        colorear(r, 'error', e.message);
+                        logsItem.push(`[ERROR] ${rutaLog}: ${e.message}`);
                     }
                 }
+
+                completadosGlobal++;
+                const compU = (completadosPorUnidad.get(u) || 0) + 1;
+                completadosPorUnidad.set(u, compU);
+
+                progreso(
+                    pc,
+                    completadosGlobal,
+                    colaGlobal.length,
+                    `Curso (${completadosGlobal}/${colaGlobal.length}) · OK: ${ok} · Errores: ${errores}`
+                );
+                progreso(
+                    u,
+                    compU,
+                    totalUnidad,
+                    compU >= totalUnidad ? 'Incluido en el ZIP del curso' : `Incluido (${compU}/${totalUnidad})`
+                );
             }
-
-            progreso(
-                pc,
-                i + 1,
-                colaGlobal.length,
-                `Curso · OK: ${ok} · Errores: ${errores} · Omitidos: ${omitidos}`
-            );
-            progreso(
-                u,
-                localIdx + 1,
-                totalUnidad,
-                'Incluido en el ZIP del curso'
-            );
-
-            await dormir(CFG.PAUSA);
-        }
+        );
 
         verificarCancelacion();
+
+        for (const logsItem of logsPorItem) pc.log.push(...logsItem);
+        const archivosParaMapa = mapaPorItem.flat();
 
         archivosParaMapa.push({
             ruta: `${carpetaCurso}/_REPORTE_CURSO.txt`,
@@ -561,7 +603,7 @@ export async function ejecutarTodoElCurso(pc) {
 
         pc.pct.textContent = '99%';
         pc.estado.textContent = 'Empaquetando curso completo en .zip...';
-        await dormir(20);
+        await dormir(10);
 
         const blob = zip.generarBlob();
 

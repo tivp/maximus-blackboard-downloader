@@ -160,7 +160,7 @@ export const urlReal = (value, base = location.href) => {
     }
 };
 
-export async function esperarHasta(prueba, ms, paso = 120) {
+export async function esperarHasta(prueba, ms, paso = 50) {
     let transcurrido = 0;
     let ultimoTick = Date.now();
 
@@ -189,6 +189,26 @@ export async function esperarHasta(prueba, ms, paso = 120) {
     } catch {
         return false;
     }
+}
+
+export async function ejecutarPool(lista, concurrencia, tarea) {
+    const items = Array.isArray(lista) ? lista : [];
+    if (!items.length) return [];
+
+    const limite = Math.max(1, Math.min(Number(concurrencia) || 1, items.length));
+    const resultados = new Array(items.length);
+    let cursor = 0;
+
+    const worker = async () => {
+        while (cursor < items.length) {
+            if (estado.cancelado) break;
+            const idx = cursor++;
+            resultados[idx] = await tarea(items[idx], idx);
+        }
+    };
+
+    await Promise.all(Array.from({ length: limite }, worker));
+    return resultados;
 }
 
 export function compatible() {
